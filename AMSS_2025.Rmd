@@ -243,6 +243,113 @@ unique_april_taxa_class %>%
 
 # let's plot out the taxonomy now for april and september at each site from our standardized data. 
 # first we need to join the wisconsin data with the kb_seine data to get the taxonomy for each site
+# separate seine meta by April and September of 2022 in kb 
+kb_seine_meta <- seine_meta %>%
+  filter(SamplingMonth %in% c("April", "September"), SamplingYear == 2022, region == "kb")
+# add in the sampling period if the Sampling Month is April then the Sampling Period is 1, if the Sampling Month is September then the Sampling Period is 6
+kb_seine_meta$SamplingPeriod <- ifelse(kb_seine_meta$SamplingMonth == "April", 1, 6)
+kb_seine_meta$SampleID <- paste(kb_seine_meta$site_id, kb_seine_meta$SamplingPeriod, sep = "_")
+# now we can join the kb_seine_meta with the wisconsin data after we aggregate the data by SampleID. We are only interested in the following columns, region, site_id, SamplingMonth, SampleID and SamplingPeriod
+
+kb_seine_meta <- kb_seine_meta %>%
+  dplyr::select(region, site_id, SamplingMonth, SampleID, SamplingPeriod)
+# aggregate the data by SampleID
+kb_seine_meta <- kb_seine_meta %>%
+  group_by(SampleID) %>%
+  summarise(region = first(region),
+            site_id = first(site_id),
+            SamplingMonth = first(SamplingMonth),
+            SamplingPeriod = first(SamplingPeriod)) %>%
+  ungroup()
+# now we can join the kb_seine_meta with the wisconsin data
+wisconsin <- as.data.frame(wisconsin)
+# long format
+wisconsin_long <- wisconsin %>%
+  rownames_to_column(var = "SampleID") %>%
+  gather(key = "ScientificName", value = "Proportion", -SampleID) %>%
+  left_join(kb_seine_meta, by = "SampleID")
+wisconsin_long <- wisconsin_long %>%  
+  left_join(unique_taxa_class, by = c("ScientificName" = "ScientificName"))
+
+# now we can plot the taxonomy for each site in April and September
+ggplot(wisconsin_long, aes(x = site_id, y = Proportion, fill = ScientificName)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~SamplingMonth) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Fish Community Composition in Kachemak Bay 2022",
+       x = "Taxon",
+       y = "Proportion",
+       fill = "Sampling Month")
+
+# Let's see if we can plot based on the taxonomic level, this column tells us what taxonomic level the taxa was classified to. So I want to nest my legend by this column with ggnewscale.
+
+# first we need to make a new column based on the taxonomic level column that will be the fill for the plot. This column tells us what level the taxa was identified to, so we need to use the column that has either "species," "genus," "family," or "NA" in it, then we need to use that value to fill in our new column that has the appropriate taxonomy based on that level and the taxa name from the other columns 
+wisconsin_long$TaxonomicLevelName <- NA
+for (i in 1:nrow(wisconsin_long)) {
+  if (is.na(wisconsin_long$TaxonomicLevel[i])) {
+    wisconsin_long$TaxonomicLevelName[i] <- "NA"
+  } else if (wisconsin_long$TaxonomicLevel[i] == "Species") {
+    wisconsin_long$TaxonomicLevelName[i] <- wisconsin_long$Species[i]
+  } else if (wisconsin_long$TaxonomicLevel[i] == "Genus") {
+    wisconsin_long$TaxonomicLevelName[i] <- wisconsin_long$Genus[i]
+  } else if (wisconsin_long$TaxonomicLevel[i] == "Family") {
+    wisconsin_long$TaxonomicLevelName[i] <- wisconsin_long$Family[i]
+  } else {
+    wisconsin_long$TaxonomicLevelName[i] <- "NA"
+  }
+}
+
+# Install ggnewscale package if not already installed
+if (!requireNamespace("ggnewscale", quietly = TRUE)) install.packages("ggnewscale")
+library(ggnewscale)
+
+# okay so now let's plot the taxonomy by taxonomic level
+ggplot(wisconsin_long, aes(x = site_id, y = Proportion, fill = Family)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~SamplingMonth) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Seine Fish Community Composition in Kachemak Bay 2022",
+       x = "Taxon",
+       y = "Proportion",
+       fill = "Taxonomic Level") +
+  new_scale_fill() 
+ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_taxonomy_plot_wisconsin.png")
+# this looks a bit funky, let's see what the data looks like without the wisconsin standardization
+# join kb_seine with the kb_seine meta 
+kb_seine <- kb_seine %>%
+  left_join(kb_seine_meta, by = "SampleID")
+# now join with taxonomic classification 
+kb_seine <- kb_seine %>%
+  left_join(unique_taxa_class, by = c("ScientificName" = "ScientificName"))
+# now we can plot the taxonomy for each site in April and September
+ggplot(kb_seine, aes(x = site_id, y = Count, fill = Family)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~SamplingMonth) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Fish Community Composition in Kachemak Bay 2022",
+       x = "Taxon",
+       y = "Count",
+       fill = "Taxonomic Level")
+ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_taxonomy_plot_raw.png")
+# okay we need to scale the data, let's do that now
+kb_seine$Count <- scale(kb_seine$Count)
+
+# now we can plot the taxonomy for each site in April and September
+ggplot(kb_seine, aes(x = site_id, y = Count, fill = Family)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~SamplingMonth) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Fish Community Composition in Kachemak Bay 2022",
+       x = "Taxon",
+       y = "Count",
+       fill = "Taxonomic Level")
+ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_taxonomy_plot_scaled.png")
+
+
 
 ```
 
