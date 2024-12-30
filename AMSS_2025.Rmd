@@ -163,6 +163,90 @@ kb_env <- kb_env %>%
 ```
 
 ```{r}
+# I just want to take a quick look at the seine data to see how many unique taxa we have 
+unique_taxa <- kb_seine %>%
+  dplyr::select(ScientificName) %>%
+  distinct()
+# alright so we have 27 unique taxa in the seine data 
+# let's look at how many belong to the April samples and the September samples 
+april_taxa <- seine %>%
+  filter(SamplingPeriod == 1 & SamplingYear == 2022) %>%
+  dplyr::select(ScientificName) %>%
+  distinct()
+# 16 unique taxa in april 
+september_taxa <- seine %>%
+  filter(SamplingPeriod == 6 & SamplingYear == 2022) %>%
+  dplyr::select(ScientificName) %>%
+  distinct()
+# 26 unique taxa in september
+# which were the taxa that were only found in september? and those that were only found in april? 
+unique_september_taxa <- september_taxa %>%
+  anti_join(april_taxa, by = "ScientificName")
+print(unique_september_taxa) # 15 unique taxa to september 
+unique_april_taxa <- april_taxa %>%
+  anti_join(september_taxa, by = "ScientificName") # 5 unique taxa to april 
+print(unique_april_taxa)
+# so we have 5 unique taxa to april and 15 unique taxa to september, and 11 taxa that are shared between the two months. Let's print out the 11 that are shared 
+shared_taxa <- april_taxa %>%
+  inner_join(september_taxa, by = "ScientificName")
+print(shared_taxa)
+
+# it is important to note that these are taxa and not species, in the seine data we have varying taxonomic levels, we can make a taxonomic classification for each of these taxa to see what level they were classified down to. I have to figure out how to join the seine data with the taxonomy data to do this. This might just be easiest to do manually, I am going to write out the unique taxa and then classify them manually. 
+write.csv(unique_taxa, "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_unique_taxa.csv")
+
+# read in the unique taxa with the classification
+unique_taxa_class <- read.csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/seine/seine_unique_taxa_taxonomic_breakdown.csv")
+# just a quick breakdown, of the unique taxa, how many were classified to the species level, genus level, family level, order level, class level, and phylum level. Let's first define the taxonomic level, this will be the column in the unique taxa class that has the classification. The order of rank is domain, kingdom, phylum, class, order, family, genus, species. I'll have R Read through each of the rows and classify the taxonomic level. If there is an NA it will write the column name in the taxonomic level column. If it goes all the way to species then it will write species in the taxonomic level column.
+unique_taxa_class$TaxonomicLevel <- NA
+for (i in 1:nrow(unique_taxa_class)){
+  if (!is.na(unique_taxa_class$Species[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Species"
+  } else if (!is.na(unique_taxa_class$Genus[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Genus"
+  } else if (!is.na(unique_taxa_class$Family[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Family"
+  } else if (!is.na(unique_taxa_class$Order[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Order"
+  } else if (!is.na(unique_taxa_class$Class[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Class"
+  } else if (!is.na(unique_taxa_class$Phylum[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Phylum"
+  } else {
+    unique_taxa_class$TaxonomicLevel[i] <- "NA"
+  }
+}
+
+unique_taxa_class %>%
+  group_by(TaxonomicLevel) %>%
+  summarise(n = n())
+# so for our 27 unique taxa, we have 23 identified down to the species level, 1 to the genus level, and three to the family level. 
+
+# let's look at the unique taxa that were only found in september, what taxonomic level were they classified to?
+
+unique_september_taxa_class <- unique_taxa_class %>%
+  filter(ScientificName %in% unique_september_taxa$ScientificName)
+print(unique_september_taxa_class)
+
+unique_september_taxa_class %>%
+  group_by(TaxonomicLevel) %>%
+  summarise(n = n())
+# 10 to species and 2 to family 
+# now april 
+unique_april_taxa_class <- unique_taxa_class %>%
+  filter(ScientificName %in% unique_april_taxa$ScientificName)
+print(unique_april_taxa_class)
+
+unique_april_taxa_class %>%
+  group_by(TaxonomicLevel) %>%
+  summarise(n = n())
+# three to species and 1 to family 
+
+# let's plot out the taxonomy now for april and september at each site from our standardized data. 
+# first we need to join the wisconsin data with the kb_seine data to get the taxonomy for each site
+
+```
+
+```{r}
 # let's do bray curtis dissimilarity and plot the results
 # first we need to make a distance matrix
 dist <- vegdist(wisconsin, method = "bray")
@@ -200,11 +284,20 @@ print(seine_mantel_test)
 permanova_test <- adonis2(wisconsin ~ SamplingMonth + site_id, data = kb_env, method = "bray")
 print(permanova_test)
 
+# this show that there is a significant difference in the fish community structure between the two sampling months, but not between the sites.
 
-# okay, so I have averaged by site id and sampling month which is making it harder to interpret relationships between environmental variables and biological data. We , we do have multiple seines from a given site, so this is a way that we can add in a random effect to the model to account for this. this would  include a random effect for site in the  analysis to account for the nested structure of the data.
+
+# okay, so I have averaged by site id and sampling month which is making it harder to interpret relationships between environmental variables and biological data. We do have multiple seines from a given site, so this is a way that we can add in a random effect to the model to account for this. this would  include a random effect for site in the analysis to account for the nested structure of the data.
 permanova_test <- adonis2(wisconsin ~ SamplingMonth + Temperature + Salinity + Turbidity + DissolvedOxygen + (1|site_id), data = kb_env, method = "bray")
 
+print(permanova_test)
 ```
 
+Let's plot out the seine taxonomy data. 
+```{r}
+# we will use the wisconsin standardized data to plot out the taxonomy for each site 
+# first we need to join the wisconsin data with the kb_seine data to get the taxonomy for each site
+rownames(wisconsin) <- site_by_species$SampleID
 
+```
 
