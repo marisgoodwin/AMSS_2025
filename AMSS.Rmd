@@ -1,0 +1,1355 @@
+---
+title: "AMSS_2025"
+author: "Maris Goodwin"
+date: "2024-12-29"
+output: html_document
+---
+This is the analysis for my AMMS 2025 presentation.
+
+The abstract is here: 
+
+Title: Understanding seasonality of fish biodiversity using eDNA metabarcoding in Kachemak
+Bay, Alaska
+Authors: Maris R. Goodwin, Zack Gold, Jennifer L. Tusten, Jessica R. Glass
+As global climate change rapidly impacts Arctic and subarctic marine ecosystems, scientists need tools that will rigorously quantify changes in biological communities. Arctic biodiversity monitoring is essential as glacial estuaries face recession, where the dynamic convergence of freshwater and marine environments has historically supported diverse ecological communities. Genomic sequencing tools such as environmental DNA (eDNA)
+metabarcoding complement conventional fisheries approaches (e.g., netting) by providing in-depth, rapid, and non-invasive assessments of species composition. We implemented eDNA metabarcoding to assess its utility as an ecological monitoring tool in 5 estuarine sites in Kachemak Bay, Alaska with varying degrees of glacial coverage (0 – 60%). We analyzed (n=100) eDNA samples from April and September 2022 in Kachemak Bay to tease apart
+seasonal and spatial patterns in fish diversity and to assess the extent to which environmental variables drive community composition. Results suggest a stronger influence of seasonal drivers on fish biodiversity than spatial drivers. Detections of fish taxa were higher using eDNA than
+conventional beach seining. The results of this study will build on existing baseline data to document changes in a region heavily impacted by climate change.
+
+A few things to note: 
+
+All (seine and eDNA) data will be standardized from 0 to 1 to provide a semiquantitative value for comparison, this will be done with a Wisconsin double standardization. In this transformation, the abundance values are first standardized by species maximum standardization, and then by sample total standardization, and by convention multiplied by 100 (here we will have values from 0 to 1). Essentially, each element is divided by its column maximum and then divided by the row total. Bray and Curtis (1957) employed a double standardization before ordination. In their study, tree species were measured on different scales than were shrubs and herbs (density and basal area for trees, frequency for herbs and shrubs), so that a species maximum standardization achieved a common scale. Their rationalization for the subsequent sample total standardization was that not all samples had the same number of measurements, and that the stand total standardizations achieved a more uniform basis for comparison. The environmental variables will be 
+
+standardized as follows: 
+salinity-
+temperature- 
+DO- 
+turbidity-
+
+
+# First we will load the necessary libraries for this analysis.
+```{r load libs}
+# Install and load necessary packages
+# if (!requireNamespace("vegan", quietly = TRUE)) install.packages("vegan")
+ #if (!requireNamespace("ecodist", quietly = TRUE)) install.packages("ecodist")
+# if (!requireNamespace("ggplot2", quietly = TRUE)) install.packages("ggplot2")
+# if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+
+library(vegan)
+library(ecodist)
+library(ggplot2)
+library(tidyverse)
+library(qiime2R)
+library(phyloseq)
+library(lubridate)
+library(iNEXT)
+library(ggVennDiagram)
+library(fitdistrplus)
+library(reshape2)
+# devtools::install_github("donaldtmcknight/microDecon") #Installs microDecon
+library(microDecon)
+```
+
+# Next we will load the data and take a look at it. 
+```{r load data}
+# Load the seine data including fish community data and taxa classification
+seine <- read.csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/seine/2019_2020_2021_2022_Fish_Community_Data.csv")
+seine_taxa <- read.csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/seine/fish_taxa_classification.csv")
+
+# load in environmental data, this is also seine metadata
+env <- read.csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/environmental/JNKB_20212022_Point_Sampling.csv")
+
+# Load in the data from the L20230323_0629C Azenta run. This has samples from April and September 2022 in Kachemak Bay. 
+edna_groups <- read.csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/eDNA/taxon_groups.csv")
+edna_tax <- read.csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/eDNA/taxonomy_collapsed.csv")
+method = "dada2-pe"
+filtering = "unfiltered"
+edna_table <- read_qza("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/eDNA/table.qza",method,filtering)
+
+edna_meta <- read_tsv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/eDNA/metadata.tsv")
+
+```
+```{r reformatting}
+# add in some reformatting of the data
+edna_meta <- edna_meta %>%
+  mutate(
+    SamplingDate = mdy(SamplingDate),
+    SamplingDate = format(SamplingDate, format = "%m/%d/%Y"),
+    sample.name.library.prep = if_else(str_detect(sample_name, "NC$"),
+                                        str_replace(sample_name, "NC$", "nc"),
+                                        sample_name)
+  )
+# Clean invalid characters and then apply the trimming and replacing operations
+edna_meta <- edna_meta %>%
+  mutate(Region = iconv(Region, from = "UTF-8", to = "UTF-8", sub = ""),  # Remove invalid characters
+         Region = str_trim(Region),         # Remove trailing spaces
+         Region = str_replace_all(Region, "Kachemak Bay", "Kachemak Bay"))  # 
+
+month_mapping <- c(
+  "Jan" = "January", "February" = "February", "Feb" = "February",
+  "Mar" = "March", "March" = "March", "Apr" = "April", "April" = "April",
+  "May" = "May", "Jun" = "June", "June" = "June", "Jul" = "July",
+  "July" = "July", "Aug" = "August", "August" = "August",
+  "Sep" = "September", "September" = "September"
+)
+
+# Clean and standardize the SamplingMonth column
+edna_meta <- edna_meta %>%
+  mutate(SamplingMonth = str_trim(SamplingMonth),  # Remove leading/trailing spaces
+         SamplingMonth = dplyr::recode(SamplingMonth, !!!month_mapping))  # Recode to consistent names
+
+env <- env %>%
+  mutate(SamplingDate = mdy(SamplingDate),
+         SamplingDate = format(SamplingDate, format = "%m/%d/%Y"))
+seine <- seine %>%
+  mutate(SamplingDate = mdy(SamplingDate),
+         SamplingDate = format(SamplingDate, format = "%m/%d/%Y"))
+```
+
+# Now we are going to get only the data we are interested in for this analysis which is the fish community data and the environmental data from Kachemak Bay in 2022 April and September. 
+```{r kb data}
+# subset the edna meta by the samples from Kachemak Bay in 2022 April and September
+kb_edna_meta <- edna_meta %>%
+  filter(SamplingYear.x == 2022, SamplingMonth %in% c("April", "September"), Region == "Kachemak Bay")
+
+# now do the same for the seine data
+kb_seine <- seine %>%
+  filter(SamplingYear == 2022, SamplingPeriod %in% c("1", "6"), Region == "kb")
+# now for the environmental data
+kb_env <- env %>%
+  filter(SamplingYear == 2022, SamplingMonth %in% c("April", "September"), region == "kb")
+```
+
+# Now we are going to standardize the seine data. 
+```{r standardize}
+# first let's create a site by species matrix from the kb_seine data, the count is in the column "Count", the species is in the column "ScientificName," and we will make a unique identifier for each sample in the column "SampleID" this will combine the SiteAcronym and the SamplingPeriod
+
+# create the unique identifier
+kb_seine$SampleID <- paste(kb_seine$SiteAcronym, kb_seine$SamplingPeriod, sep = "_")
+
+# first we need to aggregate 
+kb_seine <- kb_seine %>%
+  group_by(SampleID, ScientificName) %>%
+  summarise(Count = sum(Count)) %>% 
+  ungroup()
+# create the site by species matrix
+site_by_species <- kb_seine %>%
+  dplyr::select(SampleID, ScientificName, Count) %>%
+  spread(key = ScientificName, value = Count, fill = 0)
+seine_sampleID <- site_by_species$SampleID
+# now make the rownames the SampleID and remove the column 
+site_by_species <- site_by_species[, -1]
+rownames(site_by_species) <- seine_sampleID
+
+# let's look at our sample depth for the seine using the iNEXT package. First we need to transform the data so that it is in the correct format for the iNEXT package. This means transposing the data so that species are the rows and samples are the columns and making sure it is numeric. We will do that first. 
+t_seine <- t(site_by_species)
+t_seine <- site_by_species[,sapply(site_by_species, is.numeric)]
+t_seine <- as.data.frame(t_seine)
+t_seine <- na.omit(t_seine)
+rownames(t_seine) <- seine_sampleID
+# Remove species with zero counts across all samples
+t_seine_filtered <- t_seine[,colSums(t_seine) > 0]
+
+# Use the iNEXT package with the filtered data
+seine_rare <- iNEXT(t_seine_filtered, datatype = "abundance")
+plot(seine_rare)
+
+
+
+
+
+# Create list for iNEXT Species Incidence Frequencies
+
+# eventually we will want to compare the two sampling methods. So, for the sake of comparison, we will turn the seine data to presence absence
+t_seine_filtered[t_seine_filtered > 0] <- 1
+mor_inc <- list("Seine" = t(t_seine_filtered))
+
+# Convert to incidence frequencies
+species_incidence <- lapply(mor_inc, as.incfreq)
+
+# Define the sequence for sample sizes
+# t <- seq(1, 30, by=1)
+
+# Run iNEXT, if we wanted to add sample size then add the argument size = t at the endof the function
+out.inc2 <- iNEXT(species_incidence, q=0, datatype="incidence_freq")
+
+# Plot the results
+sample_coverage_fig <- ggiNEXT(out.inc2, type=2,color.var="Assemblage") + 
+  theme_bw(base_size = 18) + 
+  theme(plot.title = element_text(hjust = 0.5, size = 30, face = "bold"),
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 22, face = "bold"),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        plot.subtitle = element_text(size = 18),
+        legend.spacing.y = unit(0.5, 'cm'), 
+        legend.key = element_rect(linewidth = 10),
+        legend.key.size = unit(2, 'lines'))
+# save the plot as a pdf
+ggsave(plot = sample_coverage_fig, filename = "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_sample_coverage.pdf")
+
+asymptotic_estimates <- out.inc2$DataInfo
+
+# Interpretation: High Sample Coverage (SC = 0.8291): This suggests that the seine sampling effort has captured about 82.91% of the species diversity in the assemblage. While this is quite high, it also indicates that there are still some species that might be discovered with additional sampling.
+```
+
+```{r standardize}
+# now we want to standardize the data with a wisconsin double standardization
+wisconsin <- wisconsin(site_by_species) 
+
+# this now gives us a standardized site by species matrix with the proportion of each species in each sample from 0 to 1 
+
+# now we want to do the same for the environmental data, let's aggregate by site acronym and sampling date, we will take the mean of the environmental variables, if there are multiple samples for a site and date 
+kb_env <- kb_env %>%
+  group_by(site_id,SamplingMonth) %>%
+  summarise(Salinity = mean(Salinity, na.rm = TRUE),
+            Temperature = mean(Temperature, na.rm = TRUE),
+            DissolvedOxygen = mean(DissolvedOxygen, na.rm = TRUE),
+            #for turbidity we have Turbidity_rep1 and Turbidity_rep2 and Turbidity_rep3 we will take the mean of these
+            Turbidity = mean(c(Turbidity_rep1, Turbidity_rep2, Turbidity_rep3), na.rm = TRUE),
+  # add in error for each variable 
+  Salinity_error = sd(Salinity, na.rm = TRUE),
+         Temperature_error = sd(Temperature, na.rm = TRUE),
+         DissolvedOxygen_error = sd(DissolvedOxygen, na.rm = TRUE),
+         Turbidity_error = sd(c(Turbidity_rep1, Turbidity_rep2, Turbidity_rep3), na.rm = TRUE)) %>%
+  ungroup()
+# not getting error for anything except turbidity, will look at this later 
+```
+
+```{r}
+# I just want to take a quick look at the seine data to see how many unique taxa we have 
+unique_taxa <- kb_seine %>%
+  dplyr::select(ScientificName) %>%
+  distinct()
+# alright so we have 27 unique taxa in the seine data 
+# let's look at how many belong to the April samples and the September samples 
+april_taxa <- seine %>%
+  filter(SamplingPeriod == 1 & SamplingYear == 2022) %>%
+  dplyr::select(ScientificName) %>%
+  distinct()
+# 16 unique taxa in april 
+september_taxa <- seine %>%
+  filter(SamplingPeriod == 6 & SamplingYear == 2022) %>%
+  dplyr::select(ScientificName) %>%
+  distinct()
+# 26 unique taxa in september
+# which were the taxa that were only found in september? and those that were only found in april? 
+unique_september_taxa <- september_taxa %>%
+  anti_join(april_taxa, by = "ScientificName")
+print(unique_september_taxa) # 15 unique taxa to september 
+unique_april_taxa <- april_taxa %>%
+  anti_join(september_taxa, by = "ScientificName") # 5 unique taxa to april 
+print(unique_april_taxa)
+# so we have 5 unique taxa to april and 15 unique taxa to september, and 11 taxa that are shared between the two months. Let's print out the 11 that are shared 
+shared_taxa <- april_taxa %>%
+  inner_join(september_taxa, by = "ScientificName")
+print(shared_taxa)
+
+# Define the unique taxa found in April and September
+# Extract the ScientificName column as vectors
+april_taxa <- unique(april_taxa$ScientificName)
+september_taxa <- unique(september_taxa$ScientificName)
+
+# Create a list of the taxa
+taxa_list <- list(April = april_taxa, September = september_taxa)
+
+# Create the Venn diagram
+ggVennDiagram(taxa_list) +
+  ggtitle("Venn Diagram of Seine Samples")
+ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_venn_diagram.pdf")
+# it is important to note that these are taxa and not species, in the seine data we have varying taxonomic levels, we can make a taxonomic classification for each of these taxa to see what level they were classified down to. I have to figure out how to join the seine data with the taxonomy data to do this. This might just be easiest to do manually, I am going to write out the unique taxa and then classify them manually. 
+write.csv(unique_taxa, "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_unique_taxa.csv")
+
+# read in the unique taxa with the classification
+unique_taxa_class <- read.csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/seine/seine_unique_taxa_taxonomic_breakdown.csv")
+# just a quick breakdown, of the unique taxa, how many were classified to the species level, genus level, family level, order level, class level, and phylum level. Let's first define the taxonomic level, this will be the column in the unique taxa class that has the classification. The order of rank is domain, kingdom, phylum, class, order, family, genus, species. I'll have R Read through each of the rows and classify the taxonomic level. If there is an NA it will write the column name in the taxonomic level column. If it goes all the way to species then it will write species in the taxonomic level column.
+unique_taxa_class$TaxonomicLevel <- NA
+for (i in 1:nrow(unique_taxa_class)){
+  if (!is.na(unique_taxa_class$Species[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Species"
+  } else if (!is.na(unique_taxa_class$Genus[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Genus"
+  } else if (!is.na(unique_taxa_class$Family[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Family"
+  } else if (!is.na(unique_taxa_class$Order[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Order"
+  } else if (!is.na(unique_taxa_class$Class[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Class"
+  } else if (!is.na(unique_taxa_class$Phylum[i])){
+    unique_taxa_class$TaxonomicLevel[i] <- "Phylum"
+  } else {
+    unique_taxa_class$TaxonomicLevel[i] <- "NA"
+  }
+}
+
+unique_taxa_class %>%
+  group_by(TaxonomicLevel) %>%
+  summarise(n = n())
+# so for our 27 unique taxa, we have 23 identified down to the species level, 1 to the genus level, and three to the family level. 
+
+# let's look at the unique taxa that were only found in september, what taxonomic level were they classified to?
+
+unique_september_taxa_class <- unique_taxa_class %>%
+  filter(ScientificName %in% unique_september_taxa$ScientificName)
+print(unique_september_taxa_class)
+
+unique_september_taxa_class %>%
+  group_by(TaxonomicLevel) %>%
+  summarise(n = n())
+# 10 to species and 2 to family 
+# now april 
+unique_april_taxa_class <- unique_taxa_class %>%
+  filter(ScientificName %in% unique_april_taxa$ScientificName)
+print(unique_april_taxa_class)
+
+unique_april_taxa_class %>%
+  group_by(TaxonomicLevel) %>%
+  summarise(n = n())
+# three to species and 1 to family 
+
+
+
+
+# let's plot out the taxonomy now for april and september at each site from our standardized data. 
+# first we need to join the wisconsin data with the kb_seine data to get the taxonomy for each site
+# separate seine meta by April and September of 2022 in kb 
+kb_seine_meta <- seine %>%
+  filter(SamplingPeriod %in% c("1", "6"), SamplingYear == 2022, Region == "kb")
+# add in the sampling month if the Sampling period is 1 then the Sampling Month is April, if the Sampling Period is 6 then the Sampling Month is September
+kb_seine_meta$SamplingMonth <- ifelse(kb_seine_meta$SamplingPeriod == 1, "April", "September")
+kb_seine_meta$SampleID <- paste(kb_seine_meta$SiteAcronym, kb_seine_meta$SamplingPeriod, sep = "_")
+# now we can join the kb_seine_meta with the wisconsin data after we aggregate the data by SampleID. We are only interested in the following columns, region, site_id, SamplingMonth, SampleID and SamplingPeriod
+
+kb_seine_meta <- kb_seine_meta %>%
+  dplyr::select(Region, SiteAcronym, SamplingMonth, SampleID, SamplingPeriod)
+# aggregate the data by SampleID
+kb_seine_meta <- kb_seine_meta %>%
+  group_by(SampleID) %>%
+  summarise(region = first(Region),
+            site_id = first(SiteAcronym),
+            SamplingMonth = first(SamplingMonth),
+            SamplingPeriod = first(SamplingPeriod)) %>%
+  ungroup()
+# now we can join the kb_seine_meta with the wisconsin data
+wisconsin <- as.data.frame(wisconsin)
+# long format
+wisconsin_long <- wisconsin %>%
+  rownames_to_column(var = "SampleID") %>%
+  gather(key = "ScientificName", value = "Proportion", -SampleID) %>%
+  left_join(kb_seine_meta, by = "SampleID")
+wisconsin_long <- wisconsin_long %>%  
+  left_join(unique_taxa_class, by = c("ScientificName" = "ScientificName"))
+
+# now we can plot the taxonomy for each site in April and September
+ggplot(wisconsin_long, aes(x = site_id, y = Proportion, fill = ScientificName)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~SamplingMonth) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Fish Community Composition in Kachemak Bay 2022",
+       x = "Taxon",
+       y = "Proportion",
+       fill = "Sampling Month")
+
+# Let's see if we can plot based on the taxonomic level, this column tells us what taxonomic level the taxa was classified to. So I want to nest my legend by this column with ggnewscale.
+
+# first we need to make a new column based on the taxonomic level column that will be the fill for the plot. This column tells us what level the taxa was identified to, so we need to use the column that has either "species," "genus," "family," or "NA" in it, then we need to use that value to fill in our new column that has the appropriate taxonomy based on that level and the taxa name from the other columns 
+wisconsin_long$TaxonomicLevelName <- NA
+for (i in 1:nrow(wisconsin_long)) {
+  if (is.na(wisconsin_long$TaxonomicLevel[i])) {
+    wisconsin_long$TaxonomicLevelName[i] <- "NA"
+  } else if (wisconsin_long$TaxonomicLevel[i] == "Species") {
+    wisconsin_long$TaxonomicLevelName[i] <- wisconsin_long$Species[i]
+  } else if (wisconsin_long$TaxonomicLevel[i] == "Genus") {
+    wisconsin_long$TaxonomicLevelName[i] <- wisconsin_long$Genus[i]
+  } else if (wisconsin_long$TaxonomicLevel[i] == "Family") {
+    wisconsin_long$TaxonomicLevelName[i] <- wisconsin_long$Family[i]
+  } else {
+    wisconsin_long$TaxonomicLevelName[i] <- "NA"
+  }
+}
+
+# Install ggnewscale package if not already installed
+if (!requireNamespace("ggnewscale", quietly = TRUE)) install.packages("ggnewscale")
+library(ggnewscale)
+
+# okay so now let's plot the taxonomy by taxonomic level
+ggplot(wisconsin_long, aes(x = site_id, y = Proportion, fill = Family)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~SamplingMonth) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Seine Fish Community Composition in Kachemak Bay 2022",
+       x = "Taxon",
+       y = "Proportion",
+       fill = "Taxonomic Level") +
+  new_scale_fill() 
+ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_taxonomy_plot_wisconsin.png")
+# this looks a bit funky, let's see what the data looks like without the wisconsin standardization
+# join kb_seine with the kb_seine meta 
+kb_seine <- kb_seine %>%
+  left_join(kb_seine_meta, by = "SampleID")
+# now join with taxonomic classification 
+kb_seine <- kb_seine %>%
+  left_join(unique_taxa_class, by = c("ScientificName" = "ScientificName"))
+# now we can plot the taxonomy for each site in April and September
+ggplot(kb_seine, aes(x = site_id, y = Count, fill = Family)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~SamplingMonth) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Fish Community Composition in Kachemak Bay 2022",
+       x = "Taxon",
+       y = "Count",
+       fill = "Taxonomic Level")
+ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_taxonomy_plot_raw.png")
+# okay we need to scale the data, let's do that now
+kb_seine$Count <- scale(kb_seine$Count)
+
+# now we can plot the taxonomy for each site in April and September
+ggplot(kb_seine, aes(x = site_id, y = Count, fill = Family)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~SamplingMonth) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Fish Community Composition in Kachemak Bay 2022",
+       x = "Taxon",
+       y = "Count",
+       fill = "Taxonomic Level")
+ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_taxonomy_plot_scaled.png")
+
+```
+
+```{r}
+# let's do bray curtis dissimilarity and plot the results
+# first we need to make a distance matrix
+dist <- vegdist(wisconsin, method = "bray")
+
+# now we can do a non-metric multidimensional scaling
+nmds <- metaMDS(dist, k = 2, distance = "bray")
+
+nmds_coords <- as.data.frame(nmds$points)
+nmds_coords$SampleID <- site_by_species$SampleID # I had to do some fenagling for this, it will not run on its own until I fix the code above from deleting the sampleID column/rownames of the site_by species matrix
+
+# add in a variable called Sampling Month which identifies the SampleID with the SamplingMonth. for example if the SampleID is jn_1 then the SamplingMonth is April
+nmds_coords$SamplingMonth <- ifelse(str_detect(nmds_coords$SampleID, "1"), "April", "September")
+# and site is the site acronym that comes before the underscore in the SampleID
+nmds_coords$site <- str_extract(nmds_coords$SampleID, "^[^_]+")
+# now we can plot the samples with ggplot by Sample ID
+ggplot(nmds_coords, aes(x = MDS1, y = MDS2, color = SamplingMonth, shape = site)) +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "NMDS of Fish Community Data from Kachemak Bay 2022",
+       x = "NMDS1",
+       y = "NMDS2",
+       color = "Sampling Month",
+       shape = "Site")
+ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_NMDS_plot.png")
+
+# Euclidean distance matrix
+euclidean_dist <- dist(kb_env[,3:6], method = "euclidean")
+# Mantel test
+seine_mantel_test <- ecodist::mantel(dist ~ euclidean_dist)
+print(seine_mantel_test)
+
+# Correlation Coefficient (mantelr): The very low value (0.0083) indicates a very weak relationship between the biological and environmental distance matrices. P-values (pval1, pval2, pval3): All p-values are high (greater than 0.05), indicating that the observed correlation is not statistically significant. This means that there is no strong evidence to suggest a meaningful relationship between the two matrices.Confidence Interval (llim.2.5%, ulim.97.5%): The confidence interval includes zero, reinforcing the conclusion that the correlation is not significant. the Mantel test results suggest that there is no significant correlation between the biological community structure and the environmental variables in your data.
+
+# PERMANOVA
+permanova_test <- adonis2(wisconsin ~ SamplingMonth + site_id, data = kb_env, method = "bray")
+print(permanova_test)
+
+# this show that there is a significant difference in the fish community structure between the two sampling months, but not between the sites.
+
+
+# okay, so I have averaged by site id and sampling month which is making it harder to interpret relationships between environmental variables and biological data. We do have multiple seines from a given site, so this is a way that we can add in a random effect to the model to account for this. this would  include a random effect for site in the analysis to account for the nested structure of the data.
+permanova_test <- adonis2(wisconsin ~ SamplingMonth + Temperature + Salinity + Turbidity + DissolvedOxygen + (1|site_id), data = kb_env, method = "bray")
+
+print(permanova_test)
+```
+
+Let's plot out the seine taxonomy data. 
+```{r}
+# we will use the wisconsin standardized data to plot out the taxonomy for each site 
+# first we need to join the wisconsin data with the kb_seine data to get the taxonomy for each site
+rownames(wisconsin) <- site_by_species$SampleID
+
+```
+
+# eDNA data analysis. We are going to start with the data that has not been decontaminated following Zack's protocol. If it seems like there is some bizarre stuff going on with the data we will go back and decontaminate the data. 
+# Okay now we are going to decontam. 
+
+```{r}
+# let's prep the hash key for when we might decontaminate, this is also gonna help us build our ASV table 
+tax_table <- edna_tax %>% 
+  mutate(sum_taxa = paste(kingdom, phylum, class, order, family, genus, species, sep = ",")) %>%
+    # Rename 'Feature.ID' to 'Hash'
+    rename(Hash = qseqid)
+
+Hash_key_blast <- tax_table
+
+Hash_key_blast %>% 
+  distinct(Hash, .keep_all = T) -> Hash_key_blast
+
+process_count_table <- function(file_path) {
+  # Read the count table from the .qza file
+  count_table <- read_qza(file = file_path)$data
+  
+  # Convert it to a data frame
+  count_table <- as.data.frame(count_table)
+  
+  # Convert row names (Hashes) into a column called "Hash"
+  count_table_df <- rownames_to_column(count_table, var = "Hash")
+  
+  # Reshape the data from wide to long format
+  count_table_long <- count_table_df %>%
+    pivot_longer(cols = -Hash, names_to = "sample_id", values_to = "nReads")
+  
+  # Return the transformed table
+  return(count_table_long)
+}
+
+file_path <- "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/eDNA/table.qza"
+
+# Process the count table
+ASV_table <- process_count_table(file_path)
+# now join the ASV_table with the tax_table
+ASV_table <- ASV_table %>%
+  left_join(Hash_key_blast, by = "Hash")
+# now we need to subset the data to only include the samples from Kachemak Bay in 2022 April and September
+# now we can join the ASV_table with the kb_edna_meta
+ASV_table <- ASV_table %>%
+  inner_join(edna_meta, by = c("sample_id" = "sample_name"))
+
+# Fill in the ASV table with sample type and join with the cleaned hash key 
+ASV_table %>%
+  mutate(source = case_when(
+    str_detect(sample_id, "eblank") ~ "Extraction NC",
+    str_detect(sample_id, "tilapia|mahi") ~ "Positives",
+    str_detect(sample_id, "technc") ~ "Negatives",
+    str_detect(sample_id, "nc") & !str_detect(sample_id, "technc") ~ "Field Negatives",
+    TRUE ~ "Samples"
+  )) -> ASV_table
+ASV_table %>% 
+  inner_join(Hash_key_blast, by=c("Hash"="Hash")) -> ASV_table_blast 
+ASV_table_blast %>%
+  dplyr::group_by(sum_taxa.x) %>%
+  mutate (TotalReadsperSample = sum(nReads)) %>% 
+  filter(., TotalReadsperSample > 1) %>% 
+  dplyr::select(-TotalReadsperSample) -> ASV_table_used
+ASV_table_blast %>%  dim() -> all_dim
+ASV_table_used %>%  dim() -> used_only_dim
+paste0(round(used_only_dim[[1]]/all_dim[[1]]*100,2),"% ASVs retained")#100% ASVs retained"
+kb_ASV_table <- ASV_table_used %>%
+  filter((SamplingYear.x == 2022 & 
+          SamplingMonth %in% c("April", "September") & 
+          Region == "Kachemak Bay" & 
+          source == "Samples" & 
+          !grepl("^lc", sample_id)) | 
+         (source %in% c("Positives", "Negatives", "Field Negatives") & 
+          !grepl("^lc", sample_id)))
+kb_ASV_table$SampleID <- paste(kb_ASV_table$Site, kb_ASV_table$SamplingMonth, sep = "_")
+
+```
+```{r}
+# Identify blank samples
+blank_samples <- kb_ASV_table %>%
+  filter(source == "Field Negatives")
+numb.blanks <- nrow(blank_samples)
+
+# Add blank samples
+step.3_barcode1 <- bind_rows(blank_samples, kb_ASV_table)
+
+kb_ASV_table_summarized <- kb_ASV_table %>%
+  group_by(Hash, sample_id) %>%
+  summarise(nReads = sum(nReads), .groups = "drop")
+
+# Pivot to wide format
+step.3_barcode1_wide <- kb_ASV_table_summarized %>%
+  pivot_wider(names_from = sample_id, values_from = nReads, values_fill = list(nReads = 0))
+
+# Assuming metadata is available and has the correct columns
+metadata <- kb_ASV_table %>% 
+  dplyr::select(sample_id, Site, SamplingMonth) %>% 
+  distinct()
+
+# Assign groups
+sample_counter <- step.3_barcode1_wide %>%
+  pivot_longer(cols = -Hash, names_to = "sample_id", values_to = "nReads") %>%
+  left_join(metadata, by = "sample_id") %>%
+  group_by(Site, SamplingMonth) %>%
+  count()
+numb.ind <- sample_counter$n
+
+step.3_barcode1_decon <- decon(
+   data = step.3_barcode1_wide,
+   numb.blanks = nrow(blank_samples),
+   numb.ind = sample_counter$n,
+   taxa = TRUE,
+   runs = step3_runs,
+   thresh = step3_thresh,
+   prop.thresh = step3_prop.thresh,
+   regression = step3_regression
+ )
+```
+
+
+```{r}
+# Assuming your data frame is named kb_ASV_table
+
+# Process the data and create the bar plot
+kb_ASV_table %>%
+  mutate(nReads = as.numeric(nReads)) %>%
+  mutate(nReads = ifelse(is.na(nReads), 0, nReads)) %>%
+  filter(source == "Positives") %>%
+  filter(nReads > 0) %>%
+  ggplot(aes(x = sample_id, y = nReads, fill = sum_taxa.x)) +
+  geom_bar(stat = "identity") + 
+  theme_bw() +
+  labs(
+    y = "number of sequencing reads",
+    x = "sample ID",
+    title = "ASV reads - positive controls"
+  ) + 
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.3, "cm"),
+    #legend.position = "none",
+    legend.title = element_blank()
+  )
+# Calculate the maximum proportion of reads for each ASV in positive controls:
+
+prop_asvs_in_positives <- kb_ASV_table %>%
+  filter(source == "Positives") %>%
+  group_by(sample_id) %>%
+  mutate(TotalReadsPerSample = sum(nReads)) %>%
+  mutate(Prop = nReads / TotalReadsPerSample) %>%
+  group_by(Hash) %>%
+  summarise(max_prop = max(Prop)) %>%
+  arrange(desc(max_prop))
+# Subtract the maximum proportion of tag-jumped reads for each ASV from samples:
+
+indexhop_table <- kb_ASV_table %>%
+  mutate(nReads = as.numeric(nReads)) %>%
+  mutate(nReads = ifelse(is.na(nReads), 0, nReads)) %>%
+  group_by(sample_id) %>%
+  mutate(TotalReadsPerSample = sum(nReads, na.rm = TRUE)) %>%
+  left_join(prop_asvs_in_positives, by = c("Hash")) %>%
+  mutate(IndexHoppingReads = TotalReadsPerSample * max_prop) %>%
+  mutate(reads_IndexHop_removed = nReads - IndexHoppingReads) %>%
+  mutate(reads_IndexHop_removed = if_else(reads_IndexHop_removed < 0, 0, reads_IndexHop_removed))
+
+# Clean up the table by removing columns no longer needed:
+asv_table_filter1 <- indexhop_table %>%
+  dplyr::select(sample_id, source, Hash, reads_IndexHop_removed) %>%
+  dplyr::rename(reads = reads_IndexHop_removed)
+decontaminated_1 <- indexhop_table %>%
+  dplyr::select(sample_id, Hash, IndexHoppingReads) %>%
+  pivot_wider(names_from = "Hash", values_from = "IndexHoppingReads")
+
+
+reads_per_type_ASV <- asv_table_filter1 %>%
+  group_by(Hash, source) %>%
+  summarize(TotalReadsPerASV = sum(reads, na.rm = TRUE)) %>%
+  arrange(Hash)
+```
+what ASVs have no reads in samples, but reads in the controls? 
+```{r}
+not_in_samples <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "source", values_from = c("TotalReadsPerASV")) %>%
+    filter(Samples < 1 & Positives > 0 & Negatives > 0 & `Field Negatives` > 0)
+not_in_samples
+```
+```{r}
+asv_table_wide <- asv_table_filter1 %>%
+  dplyr::select(!source) %>%
+  mutate(reads = as.integer(reads)) %>%
+  pivot_wider(names_from = Hash, values_from = reads)
+
+sample_IDs <- asv_table_wide$sample_id
+
+asv_table_wide <- asv_table_wide %>%
+  ungroup() %>%
+  dplyr::select(-sample_id)
+
+## plots the figure
+rarecurve(asv_table_wide, step = 20, col = "blue", label = FALSE, 
+          main = "Sequencing Effort Curves",
+          xlab = "Sequencing Depth", ylab = "Number of ASVs Identified",
+          xlim = c(0,5000))
+```
+
+summarize in a table how many pcr replicates meet certain read count thresholds 
+```{r}
+read_summary <- asv_table_filter1 %>%
+  group_by(sample_id, source) %>%
+  summarize(tot_reads = sum(reads)) %>%
+  arrange(desc(tot_reads)) %>%
+  group_by(source) %>%
+  summarize(atleast1 = sum(tot_reads >= 1),
+            atleast250 = sum(tot_reads >= 250),
+            atleast500 = sum(tot_reads >= 500),
+            atleast750 = sum(tot_reads >= 750),
+            atleast1k = sum(tot_reads >= 1000),
+            atleast2k = sum(tot_reads >= 2000))
+read_summary
+```
+
+based on taxa accumulation curve and summary table, we will remove any pcr replicate with fewer than 1000 reads from downstream analyses
+
+```{r}
+reps_below <- asv_table_filter1 %>%
+  group_by(sample_id) %>%
+  summarise(tot_reads = sum(reads)) %>%
+  filter(tot_reads < 1000)
+asv_table_filter <- asv_table_filter1 %>%
+  filter(!sample_id %in% reps_below$sample_id)
+asv_table_filtered <- asv_table_filter %>%
+  inner_join(kb_ASV_table, by = "Hash", relationship = "many-to-many") %>%
+  filter(!(genus.x %in% c("Coryphaena","Oreochromis")))
+write.csv(asv_table_filtered, "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/ASV_table_filtered.csv")
+```
+
+```{r}
+# Step 1: Identify negative control hashes
+negative_control_hashes <- kb_ASV_table %>%
+  filter(source == "Negatives" & nReads > 0) %>%
+  pull(Hash) %>%
+  unique()
+
+# Step 2: Filter the data for negative control hashes
+filtered_data <- kb_ASV_table %>%
+  filter(Hash %in% negative_control_hashes)
+
+# Step 3: Calculate the total reads per sample
+filtered_data <- filtered_data %>%
+  group_by(sample_id) %>%
+  mutate(total_reads_per_sample = sum(nReads)) %>%
+  ungroup()
+
+# Step 4: Calculate the read percentage
+filtered_data <- filtered_data %>%
+  mutate(read_percentage = nReads / total_reads_per_sample)
+
+# Step 5: Define the threshold percentage (example value, replace with actual threshold)
+threshold_percentage <- 0.015
+
+# Step 6: Filter based on the threshold percentage
+filtered_data <- filtered_data %>%
+  filter(read_percentage >= threshold_percentage)
+
+# Print the filtered data
+print(filtered_data)
+```
+
+```{r}
+# Calculate negative control reads for the most abundant fish species
+negative_control_reads <- filtered_data %>%
+  filter(source == "Negatives") %>%
+  group_by(Hash) %>%
+  summarise(total_reads = sum(nReads)) %>%
+  arrange(desc(total_reads)) %>%
+  slice(1) %>%
+  pull(total_reads)
+
+# Calculate the number of negative controls
+number_of_negative_controls <- kb_ASV_table %>%
+  filter(source == "Negatives") %>%
+  summarise(n = n_distinct(sample_id)) %>%
+  pull(n)
+
+# Calculate the number of water samples
+number_of_water_samples <- kb_ASV_table %>%
+  filter(source == "Samples") %>%
+  summarise(n = n_distinct(sample_id)) %>%
+  pull(n)
+
+# Calculate the total target fish reads
+total_target_fish_reads <- kb_ASV_table %>%
+  filter(source == "Samples") %>%
+  summarise(total_reads = sum(nReads)) %>%
+  pull(total_reads)
+
+# Print the calculated values
+negative_control_reads
+number_of_negative_controls
+number_of_water_samples
+total_target_fish_reads
+
+per_species_per_control_contamination <- negative_control_reads / number_of_negative_controls
+total_potential_per_taxa_contamination <- per_species_per_control_contamination * number_of_water_samples
+threshold_cutoff <- total_potential_per_taxa_contamination / total_target_fish_reads
+
+# Step 2: Filter out species that contribute equal to or less than 0.55% of the total target fish reads in a sample
+filtered_data <- kb_ASV_table %>%
+  group_by(sample_id) %>%
+  mutate(total_reads_per_sample = sum(nReads)) %>%
+  ungroup() %>%
+  mutate(read_percentage = nReads / total_reads_per_sample) %>%
+  filter(read_percentage > threshold_cutoff)
+
+# Step 3: Inspect sample level rarefaction curves
+# Prepare data for rarefaction curves
+rarefaction_data <- filtered_data %>%
+  select(sample_id, Hash, nReads) %>%
+  spread(key = Hash, value = nReads, fill = 0)
+
+# Plot rarefaction curves
+plot_rarefaction_curves <- function(data) {
+  rarefaction_data <- rarefy(data, sample = min(rowSums(data)))
+  rarecurve(rarefaction_data, step = 20, sample = min(rowSums(data)), col = "blue", cex = 0.6)
+}
+
+plot_rarefaction_curves(rarefaction_data)
+
+# Step 4: Check the assemblage composition using nMDS
+# Prepare data for nMDS
+nmds_data <- filtered_data %>%
+  select(sample_id, Hash, nReads) %>%
+  spread(key = Hash, value = nReads, fill = 0) %>%
+  column_to_rownames(var = "sample_id")
+
+# Perform nMDS
+nmds_result <- metaMDS(nmds_data, distance = "bray", k = 2, trymax = 100)
+
+# Plot nMDS
+plot(nmds_result, type = "t")
+
+# Check for outliers
+stressplot(nmds_result)
+```
+### Step 1: Nest the dataset and split it in positives and samples
+```{r}
+kb_ASV_table %>% 
+  group_by(source) %>% 
+  nest() %>% 
+  pivot_wider(names_from = source, values_from =  data) -> ASV_nested 
+how.many <- function(ASVtable, round){
+  ASVtable %>% ungroup() %>% 
+    summarise(nsamples = n_distinct(sample_id),
+              nHashes = n_distinct(Hash),
+              nReads = sum(nReads), 
+              Stage = paste0("Step_", round)) %>% 
+    gather(starts_with("n"), value = "number", key = "Stat")
+}
+
+ASV_nested %>% 
+  transmute(Summary = map(Samples, ~ how.many(ASVtable = .,round = 0)))  -> ASV_summary
+
+ASV_summary %>% 
+  unnest(Summary)
+```
+### Step 2: Model the composition of the positive controls of each run 
+We create a vector of the composition of each positive control and substract it from the environmental samples from their runs
+```{r}
+ASV_nested %>% 
+  mutate (contam.tibble = map(Positives, 
+                              function(.x){
+                                .x %>%
+                                  group_by(sample_id) %>%
+                                  mutate (TotalReadsperSample = sum(nReads)) %>%
+                                  mutate (proportion = nReads/TotalReadsperSample) %>%
+                                  group_by (Hash) %>%
+                                  summarise (vector_contamination = max (proportion))
+                                }) ) -> ASV_nested
+ASV_nested %>% 
+  dplyr::select(contam.tibble) %>% 
+  unnest(cols = contam.tibble) # Check how it looks like
+ASV_nested$contam.tibble[[1]] %>% as.data.frame() %>% 
+  ggplot(aes(x= vector_contamination))+
+  geom_histogram() -> vc_plot_1
+# ggsave the vector contamination plot
+ggsave(vc_plot_1, filename = "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/vector_contamination_plot.pdf")
+```
+### Step 3: Substract the composition of the positive controls from the environment samples
+
+The idea behind this procedure is that we know, for each run, how many reads from each Hash appeared in the positive controls. These come from 2 processes: sequences we know should appear in the positive controls, and sequences that have *jumped* from the environment to the positive controls. With this procedure, we substract from every environmental sample the proportion of reads that jumped from elsewhere.
+```{r}
+ASV_nested %>% 
+  mutate(cleaned.tibble = map2(Samples, contam.tibble, function(.x,.y){ 
+    .x %>%
+      group_by (sample_id) %>%
+      mutate (TotalReadsperSample = sum (nReads)) %>%
+      left_join(.y, by = "Hash") %>%
+      mutate (Updated_nReads = ifelse (!is.na(vector_contamination),  nReads - (ceiling(vector_contamination*TotalReadsperSample)), nReads)) %>%
+      filter (Updated_nReads > 0) %>%
+      ungroup() %>% 
+      dplyr::select (sample_id, Hash, nReads = Updated_nReads)
+      
+    
+  })) -> ASV_nested
+ASV_nested %>% 
+  dplyr::select(cleaned.tibble) %>% 
+  unnest(cleaned.tibble) #Check how they look
+
+```
+
+```{r summary.file.2}
+# Add a common column to ASV_summary
+ASV_summary <- ASV_summary %>%
+  mutate(common_column = 1)
+
+# Create the new summary data frame with the common column
+ASV_nested %>% 
+  transmute(Summary.1 = map(cleaned.tibble, ~ how.many(ASVtable = ., round = "1.Jump"))) %>% 
+  mutate(common_column = 1) %>% 
+  left_join(ASV_summary, by = "common_column") %>% 
+  mutate(Summary = map2(Summary, Summary.1, bind_rows)) %>%
+  dplyr::select(-Summary.1, -common_column) -> ASV_summary
+
+ASV_summary %>% unnest(Summary)
+```
+
+## Cleaning Process 2: **Discarding samples with low number of reads**
+
+We will fit the number of reads assigned to each sample to a normal distribution and discard those samples with a probability of 95% of not fitting in that distribution. The output would be a dataset with less samples and potentially less number of unique Hashes.
+
+We are splitting this step up by sequencing run because we have a 10-fold difference in the output of reads for each sequecning run (this was because we were taking advantage of an Azenta deal)
+```{r fitting nReads per sample}
+###Pull out Sample Read Depth
+
+ASV_nested %>% 
+  dplyr::select(cleaned.tibble) %>% 
+  unnest(cleaned.tibble) %>% 
+  group_by(sample_id) %>%
+  dplyr::summarise(tot = sum(nReads)) %>% 
+  arrange(desc(tot))-> all_reps
+
+all_reps %>% 
+  pull(tot) -> reads.per.sample
+
+names(reads.per.sample) <- all_reps %>% pull(sample_id)  
+
+### Fit Normal Distribution
+low_dist_probability_cutoff <- 0.025
+minimum_read_cutoff <- 1000
+high_dist_probability_cutoff <- 1
+
+fit_1 <- fitdist(reads.per.sample, "gamma", lower=c(0,0), start=list(scale=1,shape=1))
+
+all_reps %>%  
+  mutate(prob = pgamma(tot, shape = fit_1$estimate[[2]], scale = fit_1$estimate[[1]], lower.tail = TRUE,
+                       log.p = FALSE)) -> all_reps_1
+
+### Remove Outlier Samples
+outliers_1 <- all_reps_1 %>% 
+  filter(prob < low_dist_probability_cutoff  | tot < minimum_read_cutoff | prob > high_dist_probability_cutoff) # changed to 0.025, this saved 4 samples, cutoff was originally 0.05
+outliers_1 %>% View()
+
+ASV_nested %>% 
+  mutate(Step.1.low.reads = map (cleaned.tibble, ~ filter(.,!sample_id %in% outliers_1$sample_id) %>% ungroup)) -> ASV_nested
+# Add a common column to ASV_summary
+ASV_summary <- ASV_summary %>%
+  mutate(common_column = 1)
+
+# Create the new summary data frame with the common column
+ASV_nested %>% 
+  transmute(Summary.1 = map(Step.1.low.reads, ~ how.many(ASVtable = ., round = "2.Low.nReads"))) %>% 
+  mutate(common_column = 1) %>%  # Add the common column here
+  left_join(ASV_summary, by = "common_column") %>% 
+  mutate(Summary = map2(Summary, Summary.1, bind_rows)) %>%
+  dplyr::select(-Summary.1, -common_column) -> ASV_summary
+ASV_summary %>% unnest(Summary)
+
+
+
+```
+
+## Cleaning Process 3: **Full clearance from Positive control influence**
+
+Removing the Hashes that belong to the positive controls. First, for each Hash that appeared in the positive controls, determine whether a sequence is a true positive or a true environment. For each Hash, we will calculate, maximum, mean and total number of reads in both positive and samples, and then we will use the following decision tree:
+
+  * If all three statistics are higher in one of the groups, we will label it either of Environmental or Positive control influence.
+  
+  * If there are conflicting results, we will use the Hashes. to see if they belong to either the maximum abundance of a Hash is in a positive, then it is a positive, otherwise is a real sequence from the environment.
+
+
+Now, for each Hash in each set of positives controls, calculate the proportion of reads that were missasigned - they appeared somewhere they were not expected.
+We will divide that process in two: first . A second step would be to create a column named proportion switched, which states the proportion of reads from one Hash that jumped from the environment to a positive control or viceversa. The idea is that any presence below a threshold can be arguably belong to tag jumping.
+```{r}
+kb_ASV_table %>% 
+  filter (source == "Positives") %>% 
+  group_by(Hash) %>% 
+  summarise(tot = sum(nReads)) %>% 
+  arrange(desc(tot)) %>% 
+  pull(Hash) -> good.order
+kb_ASV_table %>% 
+  filter (Hash %in% good.order) %>%
+  group_by(sample_id) %>% 
+  mutate(tot.reads = sum(nReads)) %>% 
+  group_by(Hash,sample_id) %>% 
+  mutate(prop = nReads/tot.reads) %>% 
+  group_by(Hash, source) %>% 
+  summarise (max.  = max(prop),
+             mean. = mean(prop),
+             tot.  = sum(nReads)) %>% 
+  gather(contains("."), value = "number", key = "Stat") %>%
+  spread(key = "source", value = "number", fill = 0) %>% 
+  group_by(Hash, Stat) %>%
+  mutate(origin = case_when(Positives > Samples ~ "Positive.control",
+                            TRUE                ~ "Environment")) %>% 
+  group_by (Hash) %>%
+  mutate(tot = n_distinct(origin)) -> Hash.fate.step2
+Hash.fate.step2 %>% 
+  filter(tot == 1) %>% 
+  group_by(Hash) %>% 
+  summarise(origin = unique(origin)) %>% 
+  filter(origin == "Positive.control") -> Hashes.to.remove.step2
+
+Hashes.to.remove.step2 %>% 
+  left_join(Hash_key_blast, by = "Hash") -> Hashes.to.remove.step2
+
+```
+### Remove the positive control hashes from the composition of the ASVs
+
+```{r cleaning.Step2}
+ASV_nested %>% 
+  mutate(Step2.tibble = map (Step.1.low.reads, ~ filter(.,!Hash %in% Hashes.to.remove.step2$Hash) %>% ungroup)) -> ASV_nested
+#save RDS
+#saveRDS(ASV_nested, file = "/Users/marisgoodwin/Documents/GITHUB/eDNA_estuaries/Output/ASV_nested.rds")
+ASV_summary <- ASV_summary %>%
+  mutate(common_column = 1)
+# Create the new summary data frame with the common column
+
+ASV_nested %>% 
+  transmute( Summary.1 = map(Step2.tibble, ~ how.many(ASVtable = .,round = "3.Positives"))) %>% 
+  mutate(common_column = 1) %>%
+  left_join(ASV_summary, by = "common_column") %>% 
+  mutate(Summary   = map2(Summary, Summary.1, bind_rows)) %>%
+  dplyr::select(-Summary.1, -common_column) -> ASV_summary 
+ASV_summary %>% 
+  unnest()
+```
+
+# Cleaning Process 4: **Dissimilarity between PCR (biological) replicates** 
+
+```{r dissimilarity between PCR replicates}
+ASV_nested %>% 
+  dplyr::select(Step2.tibble) %>% 
+  unnest(Step2.tibble) %>%
+  separate(sample_id, into = "original_sample", sep = "\\.", remove = F) -> cleaned.tibble
+```
+```{r quick check}
+# do all samples have a name
+cleaned.tibble %>% 
+  filter (sample_id == "")
+# do all of them have an original sample
+cleaned.tibble %>% 
+  filter(original_sample == "")
+# do all of them have a Hash
+cleaned.tibble %>% 
+  filter(is.na(Hash))
+# How many samples, how many Hashes
+cleaned.tibble %>%
+  ungroup %>% 
+  summarise(n_distinct(sample_id), # 86
+            n_distinct(Hash))   # 667
+
+# Let's check the levels of replication
+tibble <- cleaned.tibble %>%
+  # Remove samples with 'eblank' in the name
+  filter(!str_detect(sample_id, "eblank")) %>%
+  # Extract 'rep' and 'biol' from the sample_id
+  mutate(
+    PCR = str_sub(sample_id, -1),  # Last character
+    biol = str_sub(sample_id, -2, -2)  # Second-to-last character
+  ) %>%
+  # Split the remaining part of the sample_id to extract 'Site'
+  mutate(Site = str_sub(sample_id, 1, -4)) %>%
+  # Group by Site and nest the data
+  group_by(Site) 
+
+tibble <- tibble %>%
+  mutate(bio_rep = str_remove(sample_id, ".$"))
+
+
+tibble %>% 
+  group_by(Site) %>% 
+  summarise(nrep = n_distinct(PCR)) %>% 
+  #filter (nrep == 3) # all the rest
+  #filter (nrep == 2) # 13 
+ filter (nrep == 1) # 3 
+```
+
+```{r remove single replicates}
+discard.1 <- tibble %>% 
+  group_by(Site) %>% 
+  mutate(nrep = n_distinct(PCR)) %>% 
+  #filter (nrep == 2) # 25
+  filter (nrep == 1) %>% 
+  distinct(Site) %>% pull(Site)
+
+tibble %>% 
+  filter(!Site %in% discard.1) -> cleaned.tibble
+```
+
+```{r lets do the PCR replication}
+cleaned.tibble <- cleaned.tibble %>%  
+  inner_join(Hash_key_blast, by=c("Hash"="Hash"))
+cleaned.tibble %>%
+  group_by(sample_id) %>%
+  mutate(Tot = sum(nReads),
+          Row.sums = nReads / Tot) %>% 
+  group_by(sum_taxa) %>%
+  mutate(Colmax = max(Row.sums,na.rm = T),
+          Normalized.reads = Row.sums / Colmax) -> cleaned.tibble
+
+tibble_to_matrix_sum_taxa <- function (tb) {
+  
+  tb %>% 
+    group_by(sample_id, sum_taxa) %>% 
+    summarise(nReads = sum(Normalized.reads)) %>% 
+    spread(key = "sum_taxa", value = "nReads", fill = 0) -> matrix_1
+    samples <- pull (matrix_1, sample_id)
+    matrix_1 %>% 
+      ungroup() %>% 
+    dplyr::select( - sample_id) -> matrix_1
+    data.matrix(matrix_1) -> matrix_1
+    dimnames(matrix_1)[[1]] <- samples
+    vegdist(matrix_1, method = "jaccard") -> matrix_1
+}
+
+
+tibble_to_matrix_sum_taxa(cleaned.tibble) -> all.distances.full
+# Do all samples have a name?
+summary(is.na(names(all.distances.full))) # Yes they do
+```
+make the pairwise distances a long table
+```{r}
+as_tibble(subset(melt(as.matrix(all.distances.full)))) -> all.distances.melted
+
+# Any mjor screw ups
+summary(is.na(all.distances.melted$value))
+
+all.distances.to.plot <- all.distances.melted %>%
+  left_join(edna_meta, by = c("Var1" = "sample_name"), relationship = "many-to-many") %>%
+  rename(region_var1 = Region, site_var1 = Site, bottle_var1 = bottle.number, sampling_date1 = sampling.date.code) %>%
+  left_join(edna_meta, by = c("Var2" = "sample_name"), relationship = "many-to-many") %>%
+  rename(region_var2 = Region, site_var2 = Site, bottle_var2 = bottle.number, sampling_date2 = sampling.date.code) %>%
+  dplyr::select(Var1, Var2, value, region_var1, site_var1, bottle_var1, region_var2, site_var2, bottle_var2, sampling_date1, sampling_date2) %>%
+  
+  # Extract technical replicate for Var1
+  mutate(tech_rep1 = case_when(
+    str_detect(Var1, "NC$") ~ "NC",  # If sample ends with "NC", set tech_rep to "NC"
+    TRUE ~ str_extract(Var1, "\\d(?=\\D*$)")
+  )) %>%
+  
+  # Extract technical replicate for Var2
+  mutate(tech_rep2 = case_when(
+    str_detect(Var2, "NC$") ~ "NC",  # If sample ends with "NC", set tech_rep to "NC"
+    TRUE ~ str_extract(Var2, "\\d(?=\\D*$)")
+  )) %>%
+  
+  # Create additional columns to compare sample types
+  mutate(
+    Distance.type = case_when(
+      bottle_var1 == bottle_var2 & site_var1 == site_var2 & sampling_date1 == sampling_date2  ~ "PCR.replicates",  # Same PCR replicates
+      site_var1 == site_var2 & sampling_date1 == sampling_date2 ~ "Biol.replicates",          # Same biological replicates
+      region_var1 == region_var2 & site_var1 == site_var2 ~ "Same Region Same Site",          # Same region and same site
+      region_var1 == region_var2 & site_var1 != site_var2 ~ "Same Region Different Site",     # Same region, different sites
+      TRUE ~ "Different"                                                                      # Different region and site
+    )
+  ) %>%
+  
+  # Select and rename columns for the final output
+  dplyr::select(Sample1 = Var1, Sample2 = Var2, value, Distance.type) %>%
+  
+  # Exclude comparisons of the same sample
+  filter(Sample1 != Sample2)
+
+
+
+# Checking all went well
+
+sapply(all.distances.to.plot, function(x) summary(is.na(x)))
+
+all.distances.to.plot$Distance.type <- all.distances.to.plot$Distance.type  %>% fct_relevel( "PCR.replicates", "Biol.replicates", "Same Region Different Site","Same Region Same Site")
+
+  ggplot (all.distances.to.plot ) +
+  geom_histogram (aes (fill = Distance.type, x = value, after_stat(ndensity)), position = "dodge",  alpha = 0.9, bins = 50) +
+  facet_wrap( ~ Distance.type) +
+  labs (x = "Pairwise dissimilarity", y = "density" ,
+        Distance.type = "Distance") +
+    guides (fill = "none")
+ggsave("visual.anova.png", dpi = "retina")
+```
+
+```{r}
+kb_ASV_table <- kb_ASV_table %>%
+  group_by(SampleID, sum_taxa.x) %>%
+  mutate(Count = sum(nReads)) %>%
+  ungroup() %>%
+  distinct()
+
+# create the site by species matrix
+site_by_species_eDNA <- kb_ASV_table %>%
+  dplyr::select(SampleID, sum_taxa.x, Count) %>%
+  spread(key = sum_taxa.x, value = Count, fill = 0)
+edna_sampleID <- site_by_species_eDNA$SampleID
+site_by_species_eDNA <- site_by_species_eDNA[, -1]
+
+rownames(site_by_species_eDNA) <- edna_sampleID
+
+t_edna <- t(site_by_species_eDNA)
+t_edna <- site_by_species_eDNA[,sapply(site_by_species_eDNA, is.numeric)]
+t_edna <- as.data.frame(t_edna)
+t_edna <- na.omit(t_edna)
+rownames(t_edna) <- edna_sampleID
+# Remove species with zero counts across all samples
+t_edna_filtered <- t_edna[,colSums(t_edna) > 0]
+
+# Create list for iNEXT Species Incidence Frequencies
+
+# eventually we will want to compare the two sampling methods. So, for the sake of comparison, we will turn the seine data to presence absence
+t_edna_filtered[t_edna_filtered > 0] <- 1
+
+mor_inc <- list("Seine" = t(t_seine_filtered),
+                "eDNA" = t(t_edna_filtered))
+
+# Convert to incidence frequencies
+species_incidence <- lapply(mor_inc, as.incfreq)
+
+# Define the sequence for sample sizes
+# t <- seq(1, 30, by=1)
+
+# Run iNEXT, if we wanted to add sample size then add the argument size = t at the endof the function
+out.inc2 <- iNEXT(species_incidence, q=0, datatype="incidence_freq")
+
+# Plot the results
+sample_coverage_fig <- ggiNEXT(out.inc2, type=2,color.var="Assemblage") + 
+  theme_bw(base_size = 18) + 
+  theme(plot.title = element_text(hjust = 0.5, size = 30, face = "bold"),
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 22, face = "bold"),
+        legend.title = element_text(size = 16),
+        legend.text = element_text(size = 16),
+        plot.subtitle = element_text(size = 18),
+        legend.spacing.y = unit(0.5, 'cm'), 
+        legend.key = element_rect(linewidth = 10),
+        legend.key.size = unit(2, 'lines'))
+
+# save the plot as a pdf
+ggsave(plot = sample_coverage_fig, filename = "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/eDNA_seine_sample_coverage.pdf")
+asymptotic_estimates <- out.inc2$DataInfo
+# Seine Assemblage: With a sample coverage of 82.91%, the seine observed most of the species, but additional sampling could have revealed more species. The majority of species are found in only one or two sites, indicating a relatively high level of site-specific species.
+
+# on the other hand, the eDNA assemblage has a sample coverage of 97.62%, indicating that nearly all the species diversity has been captured. The species are more evenly distributed across the sites, with several species found in multiple sites, indicating a more homogeneous distribution. 
+
+
+```
+
+Let's look at the taxonomy of the eDNA data. 
+```{r}
+# Filter and select unique taxa for April and September with Count > 0
+april_taxa_edna <- kb_ASV_table %>%
+  filter(grepl("April", SampleID) & Count > 0) %>%
+  dplyr::select(sum_taxa.x) %>%
+  distinct() %>%
+  pull(sum_taxa.x)
+
+september_taxa_edna <- kb_ASV_table %>%
+  filter(grepl("September", SampleID) & Count > 0) %>%
+  dplyr::select(sum_taxa.x) %>%
+  distinct() %>%
+  pull(sum_taxa.x)
+
+# Create a list of the taxa
+taxa_list <- list(April = april_taxa_edna, September = september_taxa_edna)
+
+# Create the Venn diagram with labels
+venn_plot <- ggVennDiagram(taxa_list, label_alpha = 0) +
+  ggtitle("Venn Diagram of eDNA samples") +
+  theme(legend.position = "none") # Remove the legend for clarity
+ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/eDNA_venn_diagram.pdf")
+# Extract the unique and shared taxa
+unique_april <- setdiff(april_taxa_edna, september_taxa_edna)
+unique_september <- setdiff(september_taxa_edna, april_taxa_edna)
+shared_taxa <- intersect(april_taxa_edna, september_taxa_edna)
+
+# Add labels for unique and shared taxa
+write.csv(kb_ASV_table, "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/eDNA_ASV_table.csv")
+
+# Display the Venn diagram
+print(venn_plot)
+
+kb_ASV_table$TaxonomicLevel <- NA
+for (i in 1:nrow(kb_ASV_table)){
+  if (!is.na(kb_ASV_table$species.x[i])){
+    kb_ASV_table$TaxonomicLevel[i] <- "Species"
+  } else if (!is.na(kb_ASV_table$genus.x[i])){
+    kb_ASV_table$TaxonomicLevel[i] <- "Genus"
+  } else if (!is.na(kb_ASV_table$family.x[i])){
+    kb_ASV_table$TaxonomicLevel[i] <- "Family"
+  } else if (!is.na(kb_ASV_table$order.x[i])){
+    kb_ASV_table$TaxonomicLevel[i] <- "Order"
+  } else if (!is.na(kb_ASV_table$class.x[i])){
+    kb_ASV_table$TaxonomicLevel[i] <- "Class"
+  } else if (!is.na(kb_ASV_table$phylum.x[i])){
+    kb_ASV_table$TaxonomicLevel[i] <- "Phylum"
+  } else {
+    kb_ASV_table$TaxonomicLevel[i] <- "NA"
+  }
+}
+
+# Group by TaxonomicLevel and sum_taxa, then count the occurrences
+taxonomic_counts <- kb_ASV_table %>%
+  group_by(TaxonomicLevel, sum_taxa.x, nReads > 0) %>%
+  summarise(n = n()) %>%
+  distinct()
+
+# Summarize the counts for each taxonomic level
+taxonomic_counts %>%
+     group_by(TaxonomicLevel,`nReads > 0` == "TRUE") %>%
+     summarise(total_count = n())
+
+
+
+```
+Now compare eDNA and seine 
+```{r}
+# Extract unique taxa from the seine data
+seine_taxa <- kb_seine %>%
+  dplyr::select(ScientificName) %>%
+  distinct() %>%
+  pull(ScientificName)
+
+# Extract unique taxa from the eDNA data for April and September with Count > 0
+edna_taxa <- kb_ASV_table %>%
+  filter((grepl("April", SampleID) | grepl("September", SampleID)) & Count > 0) %>%
+  dplyr::select(sum_taxa.x) %>%
+  distinct() %>%
+  pull(sum_taxa.x)
+
+# Create a list of the taxa
+taxa_list <- list(Seine = seine_taxa, eDNA = edna_taxa)
+
+# Create the Venn diagram with labels
+venn_plot <- ggVennDiagram(taxa_list, label_alpha = 0) +
+  ggtitle("Venn Diagram of Unique Taxa in Seine and eDNA Samples") +
+  theme(legend.position = "none") # Remove the legend for clarity
+ggplot2::ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_edna_venn_diagram.pdf")
+# Extract the unique and shared taxa
+unique_seine <- setdiff(seine_taxa, edna_taxa)
+unique_edna <- setdiff(edna_taxa, seine_taxa)
+shared_taxa <- intersect(seine_taxa, edna_taxa)
+
+```
+
+# Rarefaction curves for the eDNA data. Was our sampling depth enough to cover all the diversity within our samples 
+```{r}
+# this is the line of code we will be using to plot rarefaction curves for  the data. From this link: https://grunwaldlab.github.io/metacoder_documentation/workshop--06--quality_control.html. We will need to make some modifications to fit with our given data. and we want to 
+rarecurve(t(obj$data$otu_counts[, "M1981P563"]), step = 20,
+          sample = min(colSums(obj$data$otu_counts[, sample_data$SampleID])),
+          col = "blue", cex = 1.5)
+```
+
+
+
+# Select the relevant columns
+df <- edna_meta %>% dplyr::select(Region, Site, SamplingDate)
+
+# Drop duplicate rows
+df <- df %>% distinct()
+
+# Sort the dataframe by Region and Site
+df <- df %>% arrange(Region, Site)
