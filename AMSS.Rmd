@@ -429,7 +429,7 @@ dist <- vegdist(wisconsin, method = "bray")
 nmds <- metaMDS(dist, k = 2, distance = "bray")
 
 nmds_coords <- as.data.frame(nmds$points)
-nmds_coords$SampleID <- site_by_species$SampleID # I had to do some fenagling for this, it will not run on its own until I fix the code above from deleting the sampleID column/rownames of the site_by species matrix
+nmds_coords$SampleID <- rownames(nmds_coords)# I had to do some fenagling for this, it will not run on its own until I fix the code above from deleting the sampleID column/rownames of the site_by species matrix
 
 # add in a variable called Sampling Month which identifies the SampleID with the SamplingMonth. for example if the SampleID is jn_1 then the SamplingMonth is April
 nmds_coords$SamplingMonth <- ifelse(str_detect(nmds_coords$SampleID, "1"), "April", "September")
@@ -594,8 +594,6 @@ step.3_barcode1_decon <- decon(
 
 
 ```{r}
-# Assuming your data frame is named kb_ASV_table
-
 # Process the data and create the bar plot
 kb_ASV_table %>%
   mutate(nReads = as.numeric(nReads)) %>%
