@@ -540,21 +540,11 @@ ASV_table_blast %>%
 ASV_table_blast %>%  dim() -> all_dim
 ASV_table_used %>%  dim() -> used_only_dim
 paste0(round(used_only_dim[[1]]/all_dim[[1]]*100,2),"% ASVs retained")#100% ASVs retained"
-kb_ASV_table <- ASV_table_used %>%
-  filter((SamplingYear.x == 2022 & 
-          SamplingMonth %in% c("April", "September") & 
-          Region == "Kachemak Bay" & 
-          source == "Samples" & 
-          !grepl("^lc", sample_id)) | 
-         (source %in% c("Positives", "Negatives", "Field Negatives") & 
-          !grepl("^lc", sample_id)))
-kb_ASV_table$SampleID <- paste(kb_ASV_table$Site, kb_ASV_table$SamplingMonth, sep = "_")
-
 ```
 
 ### Step 1: Nest the dataset and split it in positives and samples
 ```{r}
-kb_ASV_table %>% 
+ASV_table %>% 
   group_by(source) %>% 
   nest() %>% 
   pivot_wider(names_from = source, values_from =  data) -> ASV_nested 
@@ -573,7 +563,7 @@ ASV_nested %>%
 ASV_summary %>% 
   unnest(Summary)
 
-# we have 103 samples, 1257 hashes, and 6832925 reads starting out
+# we have 196 samples, 1735 hashes, and 16230549 reads starting out
 ```
 ### Step 2: Model the composition of the positive controls of each run 
 We create a vector of the composition of each positive control and substract it from the environmental samples from their runs
@@ -635,7 +625,7 @@ ASV_nested %>%
 
 ASV_summary %>% unnest(Summary)
 
-# now we have 95 samples, 669 hashes, and 4651142 reads 
+# now we have 196 samples, 1609 hashes, and 9860950 reads 
 ```
 
 ## Cleaning Process 2: **Discarding samples with low number of reads**
@@ -689,7 +679,7 @@ ASV_nested %>%
   dplyr::select(-Summary.1, -common_column) -> ASV_summary
 ASV_summary %>% unnest(Summary)
 
-# now we have 86 samples, 667 hashes, and 4649397 reads 
+# now we have 187 samples, 1603 hashes, and 9859823 reads 
 
 
 ```
@@ -706,13 +696,13 @@ Removing the Hashes that belong to the positive controls. First, for each Hash t
 Now, for each Hash in each set of positives controls, calculate the proportion of reads that were missasigned - they appeared somewhere they were not expected.
 We will divide that process in two: first . A second step would be to create a column named proportion switched, which states the proportion of reads from one Hash that jumped from the environment to a positive control or viceversa. The idea is that any presence below a threshold can be arguably belong to tag jumping.
 ```{r}
-kb_ASV_table %>% 
+ASV_table %>% 
   filter (source == "Positives") %>% 
   group_by(Hash) %>% 
   summarise(tot = sum(nReads)) %>% 
   arrange(desc(tot)) %>% 
   pull(Hash) -> good.order
-kb_ASV_table %>% 
+ASV_table %>% 
   filter (Hash %in% good.order) %>%
   group_by(sample_id) %>% 
   mutate(tot.reads = sum(nReads)) %>% 
@@ -759,7 +749,7 @@ ASV_nested %>%
 ASV_summary %>% 
   unnest()
 
-# we still have 86 samples, 667 hashes, and 4649397 reads 
+# we still have 187 samples, 1603 hashes, and 9859823 reads 
 
 ```
 
@@ -950,20 +940,32 @@ colnames(Hash_key_update) <- gsub("Step2.tibble_", "", colnames(Hash_key_update)
 # now we can join the ASV table with the Hash key
 kb_ASV_update %>%
   left_join(Hash_key_update, by = c("Hash" = "Hash")) -> kb_ASV_table
-
+kb_ASV_table <- ASV_table_used %>%
+  filter((SamplingYear.x == 2022 & 
+          SamplingMonth %in% c("April", "September") & 
+          Region == "Kachemak Bay" & 
+          source == "Samples" & 
+          !grepl("^lc", sample_id)) | 
+         (source %in% c("Positives", "Negatives", "Field Negatives") & 
+          !grepl("^lc", sample_id)))
+kb_ASV_table$SampleID <- paste(kb_ASV_table$Site, kb_ASV_table$SamplingMonth, sep = "_")
+# remove the pc and technc samples, and nc
+kb_ASV_table <- kb_ASV_table %>%
+  filter(!grepl("pc|technc|NC|nc", sample_id))
+unique(kb_ASV_table$sample_id)
 ```
 
 ```{r}
 kb_ASV_table <- kb_ASV_table %>%
-  group_by(sample_id, sum_taxa) %>%
+  group_by(sample_id, sum_taxa.x) %>%
   mutate(Count = sum(nReads)) %>%
   ungroup() %>%
   distinct()
 
 site_by_species_eDNA <- kb_ASV_table %>%
-  dplyr::select(sample_id, sum_taxa, Count) %>%
+  dplyr::select(sample_id, sum_taxa.x, Count) %>%
   distinct() %>%
-  spread(key = sum_taxa, value = Count, fill = 0)
+  spread(key = sum_taxa.x, value = Count, fill = 0)
 
 edna_sampleID <- site_by_species_eDNA$sample_id
 site_by_species_eDNA <- site_by_species_eDNA[, -1]
@@ -1015,7 +1017,7 @@ print(asymptotic_estimates)
 
 # Seine Assemblage: With a sample coverage of 94.08%, the seine observed most of the species, but additional sampling could have revealed more species. The majority of species are found in only one or two sites, indicating a relatively high level of site-specific species.
 
-# on the other hand, the eDNA assemblage has a sample coverage of 98.75%, indicating that nearly all the species diversity has been captured. The species are more evenly distributed across the sites, with several species found in multiple sites, indicating a more homogeneous distribution. 
+# on the other hand, the eDNA assemblage has a sample coverage of 99.16%, indicating that nearly all the species diversity has been captured. The species are more evenly distributed across the sites, with several species found in multiple sites, indicating a more homogeneous distribution. 
 
 
 ```
@@ -1033,35 +1035,35 @@ kb_ASV_table <- kb_ASV_table %>%
 # Filter and select unique taxa for April and September with Count > 0
 april_taxa_edna <- kb_ASV_table %>%
   filter(grepl("April", SamplingMonth) & Count > 0) %>%
-  dplyr::select(sum_taxa) %>%
+  dplyr::select(sum_taxa.x) %>%
   distinct() %>%
-  pull(sum_taxa)
+  pull(sum_taxa.x)
 
 september_taxa_edna <- kb_ASV_table %>%
   filter(grepl("September", SamplingMonth) & Count > 0) %>%
-  dplyr::select(sum_taxa) %>%
+  dplyr::select(sum_taxa.x) %>%
   distinct() %>%
-  pull(sum_taxa)
+  pull(sum_taxa.x)
 
 # Create a list of the taxa
 taxa_list <- list(April = april_taxa_edna, September = september_taxa_edna)
 
 # Create the Venn diagram with labels
-venn_plot <- ggVennDiagram(taxa_list, label_alpha = 0) +
+venn_species <- ggVennDiagram(taxa_list, label_alpha = 0) +
   ggtitle("Venn Diagram of eDNA samples") +
   theme(legend.position = "none") # Remove the legend for clarity
-print(venn_plot)
-ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/eDNA_venn_diagram.pdf")
+print(venn_species)
+# ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/eDNA_venn_diagram.pdf")
 # Extract the unique and shared taxa
 unique_april <- setdiff(april_taxa_edna, september_taxa_edna)
 # having talked to peter and chris guo, it doesn't seem like clarkii, cylindraceum, and mordax would be found in kbay. let's look at what samples these occured in for april.
 kb_ASV_table %>%
-  filter(sum_taxa %in% c("Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Oncorhynchus,Oncorhynchus clarkii", "Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Prosopium,Prosopium cylindraceum", "Eukaryota,Chordata,Actinopteri,Osmeriformes,Osmeridae,Osmerus,Osmerus mordax") & grepl("April", SamplingMonth)) %>%
-  dplyr::select(sample_id, sum_taxa, Count) %>%
-  arrange(sum_taxa, desc(Count))
+  filter(sum_taxa.x %in% c("Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Oncorhynchus,Oncorhynchus clarkii", "Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Prosopium,Prosopium cylindraceum", "Eukaryota,Chordata,Actinopteri,Osmeriformes,Osmeridae,Osmerus,Osmerus mordax") & grepl("April", SamplingMonth)) %>%
+  dplyr::select(sample_id, sum_taxa.x, Count) %>%
+  arrange(sum_taxa.x, desc(Count))
 # each of these only occured in one PCR replicate and a single sample for each, at a different site. I think we can safely remove these from the dataset.
 kb_ASV_table <- kb_ASV_table %>%
-  filter(!sum_taxa %in% c("Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Oncorhynchus,Oncorhynchus clarkii", "Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Prosopium,Prosopium cylindraceum", "Eukaryota,Chordata,Actinopteri,Osmeriformes,Osmeridae,Osmerus,Osmerus mordax"))
+  filter(!sum_taxa.x %in% c("Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Oncorhynchus,Oncorhynchus clarkii", "Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Prosopium,Prosopium cylindraceum", "Eukaryota,Chordata,Actinopteri,Osmeriformes,Osmeridae,Osmerus,Osmerus mordax"))
 unique_september <- setdiff(september_taxa_edna, april_taxa_edna)
 shared_taxa <- intersect(april_taxa_edna, september_taxa_edna)
 
@@ -1073,17 +1075,17 @@ print(venn_plot)
 
 kb_ASV_table$TaxonomicLevel <- NA
 for (i in 1:nrow(kb_ASV_table)){
-  if (!is.na(kb_ASV_table$species[i])){
+  if (!is.na(kb_ASV_table$species.x[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Species"
-  } else if (!is.na(kb_ASV_table$genus[i])){
+  } else if (!is.na(kb_ASV_table$genus.x[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Genus"
-  } else if (!is.na(kb_ASV_table$family[i])){
+  } else if (!is.na(kb_ASV_table$family.x[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Family"
-  } else if (!is.na(kb_ASV_table$order[i])){
+  } else if (!is.na(kb_ASV_table$order.x[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Order"
-  } else if (!is.na(kb_ASV_table$class[i])){
+  } else if (!is.na(kb_ASV_table$class.x[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Class"
-  } else if (!is.na(kb_ASV_table$phylum[i])){
+  } else if (!is.na(kb_ASV_table$phylum.x[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Phylum"
   } else {
     kb_ASV_table$TaxonomicLevel[i] <- "NA"
@@ -1092,7 +1094,7 @@ for (i in 1:nrow(kb_ASV_table)){
 
 # Group by TaxonomicLevel and sum_taxa, then count the occurrences
 taxonomic_counts <- kb_ASV_table %>%
-  group_by(TaxonomicLevel, sum_taxa, nReads > 0) %>%
+  group_by(TaxonomicLevel, sum_taxa.x, nReads > 0) %>%
   summarise(n = n()) %>%
   distinct()
 
@@ -1112,13 +1114,13 @@ seine_taxa <- unique_taxa
 # Extract unique taxa from the eDNA data for April and September with Count > 0
 edna_taxa <- kb_ASV_table %>%
   filter((grepl("April", SamplingMonth) | grepl("September", SamplingMonth)) & Count > 0) %>%
-  dplyr::select(sum_taxa) %>%
+  dplyr::select(sum_taxa.x) %>%
   distinct() %>%
-  pull(sum_taxa)
+  pull(sum_taxa.x)
 # let's separate the sum_taxa into the different taxonomic levels. we will just join with the kb_ASV_table to get the taxonomic levels
 edna_taxa <- kb_ASV_table %>%
-  filter(sum_taxa %in% edna_taxa) %>%
-  dplyr::select(sum_taxa, species, genus, family, order, class, phylum) %>%
+  filter(sum_taxa.x %in% edna_taxa) %>%
+  dplyr::select(sum_taxa.x, species.x, genus.x, family.x, order.x, class.x, phylum.x) %>%
   distinct()
 
 # Create a list of the taxa
