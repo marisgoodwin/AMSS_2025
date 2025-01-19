@@ -128,7 +128,7 @@ kb_env <- env %>%
 # first let's create a site by species matrix from the kb_seine data, the count is in the column "Count", the species is in the column "ScientificName," and we will make a unique identifier for each sample in the column "SampleID" this will combine the SiteAcronym and the SamplingPeriod
 
 # create the unique identifier
-kb_seine$SampleID <- paste(kb_seine$SiteAcronym, kb_seine$SamplingPeriod, sep = "_")
+kb_seine$SampleID <- paste(kb_seine$SiteAcronym, kb_seine$SamplingPeriod,kb_seine$SeineSetNumber,sep = "_")
 
 # first we need to aggregate 
 kb_seine <- kb_seine %>%
@@ -153,18 +153,12 @@ rownames(t_seine) <- seine_sampleID
 # Remove species with zero counts across all samples
 t_seine_filtered <- t_seine[,colSums(t_seine) > 0]
 
-# Use the iNEXT package with the filtered data
-seine_rare <- iNEXT(t_seine_filtered, datatype = "abundance")
-plot(seine_rare)
-
-
-
-
 
 # Create list for iNEXT Species Incidence Frequencies
 
 # eventually we will want to compare the two sampling methods. So, for the sake of comparison, we will turn the seine data to presence absence
 t_seine_filtered[t_seine_filtered > 0] <- 1
+
 mor_inc <- list("Seine" = t(t_seine_filtered))
 
 # Convert to incidence frequencies
@@ -188,12 +182,13 @@ sample_coverage_fig <- ggiNEXT(out.inc2, type=2,color.var="Assemblage") +
         legend.spacing.y = unit(0.5, 'cm'), 
         legend.key = element_rect(linewidth = 10),
         legend.key.size = unit(2, 'lines'))
+print(sample_coverage_fig)
 # save the plot as a pdf
 ggsave(plot = sample_coverage_fig, filename = "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_sample_coverage.pdf")
 
 asymptotic_estimates <- out.inc2$DataInfo
-
-# Interpretation: High Sample Coverage (SC = 0.8291): This suggests that the seine sampling effort has captured about 82.91% of the species diversity in the assemblage. While this is quite high, it also indicates that there are still some species that might be discovered with additional sampling.
+print(asymptotic_estimates)
+# Interpretation: High Sample Coverage (SC = 0.9408): This suggests that the seine sampling effort has captured about 94.08% of the species diversity in the assemblage. While this is quite high, it also indicates that there are still some species that might be discovered with additional sampling.
 ```
 
 ```{r standardize}
@@ -481,7 +476,7 @@ rownames(wisconsin) <- site_by_species$SampleID
 
 ```
 
-# eDNA data analysis. We are going to start with the data that has not been decontaminated following Zack's protocol. If it seems like there is some bizarre stuff going on with the data we will go back and decontaminate the data. 
+# eDNA data analysis. We are going to follow Zack's decontam protocol.
 # Okay now we are going to decontam. 
 
 ```{r}
@@ -577,6 +572,8 @@ ASV_nested %>%
 
 ASV_summary %>% 
   unnest(Summary)
+
+# we have 103 samples, 1257 hashes, and 6832925 reads starting out
 ```
 ### Step 2: Model the composition of the positive controls of each run 
 We create a vector of the composition of each positive control and substract it from the environmental samples from their runs
@@ -637,6 +634,8 @@ ASV_nested %>%
   dplyr::select(-Summary.1, -common_column) -> ASV_summary
 
 ASV_summary %>% unnest(Summary)
+
+# now we have 95 samples, 669 hashes, and 4651142 reads 
 ```
 
 ## Cleaning Process 2: **Discarding samples with low number of reads**
@@ -690,6 +689,7 @@ ASV_nested %>%
   dplyr::select(-Summary.1, -common_column) -> ASV_summary
 ASV_summary %>% unnest(Summary)
 
+# now we have 86 samples, 667 hashes, and 4649397 reads 
 
 
 ```
@@ -758,6 +758,9 @@ ASV_nested %>%
   dplyr::select(-Summary.1, -common_column) -> ASV_summary 
 ASV_summary %>% 
   unnest()
+
+# we still have 86 samples, 667 hashes, and 4649397 reads 
+
 ```
 
 # Cleaning Process 4: **Dissimilarity between PCR (biological) replicates** 
@@ -853,7 +856,7 @@ tibble_to_matrix_sum_taxa(cleaned.tibble) -> all.distances.full
 # Do all samples have a name?
 summary(is.na(names(all.distances.full))) # Yes they do
 ```
-make the pairwise distances a long table
+make the pairwise distances a long table. NOTE: THIS IS NOT IDENTIFYING SAMPLES CORRECTLY. I THINK WE ARE GOING TO SKIP THIS FOR NOW BECAUSE THE DATA IS WHACK! 
 ```{r}
 as_tibble(subset(melt(as.matrix(all.distances.full)))) -> all.distances.melted
 
@@ -911,20 +914,58 @@ all.distances.to.plot$Distance.type <- all.distances.to.plot$Distance.type  %>% 
         Distance.type = "Distance") +
     guides (fill = "none")
 ggsave("visual.anova.png", dpi = "retina")
+
+
+```
+
+### WE ARE SKIPPING DISSIMILARITY BETWEEN PCR REPLICATES BECAUSE THE LINES ABOVE ARE NOT IDENTIFYING SAMPLES CORRECTLY. 
+
+## Exporting the output
+
+We will export the final cleaned table with four columns (Miseq_run, sample, Hash, nReads)
+
+```{r}
+ASV_nested %>% 
+  dplyr::select(Step2.tibble) %>% 
+  unnest(Step2.tibble,names_sep = "_") %>% 
+  mutate(Step2.tibble_nReads = as.integer(Step2.tibble_nReads)) %>% write_csv("~/Documents/GITHUB/AMSS_2025/outputs/ASV_table_after_cleanup.csv")
+ASV_nested %>% 
+  dplyr::select(Step2.tibble) %>% 
+  unnest(Step2.tibble,names_sep = "_") %>% 
+  distinct(Step2.tibble_Hash) %>% 
+  left_join(Hash_key_blast, by = c("Step2.tibble_Hash" = "Hash")) %>% 
+  write_csv("~/Documents/GITHUB/AMSS_2025/outputs/Hash_Key_after_cleanup.csv")
+```
+
+```{r}
+# read in the updated data 
+kb_ASV_update <- read_csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/ASV_table_after_cleanup.csv")
+Hash_key_update <- read_csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/Hash_Key_after_cleanup.csv")
+
+# change the column names to remove the Step2.tibble_ prefix
+colnames(kb_ASV_update) <- gsub("Step2.tibble_", "", colnames(kb_ASV_update))
+# now the same for the Hash key column called Step2.tibble_Hash
+colnames(Hash_key_update) <- gsub("Step2.tibble_", "", colnames(Hash_key_update))
+
+# now we can join the ASV table with the Hash key
+kb_ASV_update %>%
+  left_join(Hash_key_update, by = c("Hash" = "Hash")) -> kb_ASV_table
+
 ```
 
 ```{r}
 kb_ASV_table <- kb_ASV_table %>%
-  group_by(SampleID, sum_taxa.x) %>%
+  group_by(sample_id, sum_taxa) %>%
   mutate(Count = sum(nReads)) %>%
   ungroup() %>%
   distinct()
 
-# create the site by species matrix
 site_by_species_eDNA <- kb_ASV_table %>%
-  dplyr::select(SampleID, sum_taxa.x, Count) %>%
-  spread(key = sum_taxa.x, value = Count, fill = 0)
-edna_sampleID <- site_by_species_eDNA$SampleID
+  dplyr::select(sample_id, sum_taxa, Count) %>%
+  distinct() %>%
+  spread(key = sum_taxa, value = Count, fill = 0)
+
+edna_sampleID <- site_by_species_eDNA$sample_id
 site_by_species_eDNA <- site_by_species_eDNA[, -1]
 
 rownames(site_by_species_eDNA) <- edna_sampleID
@@ -949,7 +990,7 @@ mor_inc <- list("Seine" = t(t_seine_filtered),
 species_incidence <- lapply(mor_inc, as.incfreq)
 
 # Define the sequence for sample sizes
-# t <- seq(1, 30, by=1)
+ #t <- seq(1, 10, by=1)
 
 # Run iNEXT, if we wanted to add sample size then add the argument size = t at the endof the function
 out.inc2 <- iNEXT(species_incidence, q=0, datatype="incidence_freq")
@@ -966,31 +1007,41 @@ sample_coverage_fig <- ggiNEXT(out.inc2, type=2,color.var="Assemblage") +
         legend.spacing.y = unit(0.5, 'cm'), 
         legend.key = element_rect(linewidth = 10),
         legend.key.size = unit(2, 'lines'))
-
+print(sample_coverage_fig)
 # save the plot as a pdf
 ggsave(plot = sample_coverage_fig, filename = "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/eDNA_seine_sample_coverage.pdf")
 asymptotic_estimates <- out.inc2$DataInfo
-# Seine Assemblage: With a sample coverage of 82.91%, the seine observed most of the species, but additional sampling could have revealed more species. The majority of species are found in only one or two sites, indicating a relatively high level of site-specific species.
+print(asymptotic_estimates)
 
-# on the other hand, the eDNA assemblage has a sample coverage of 97.62%, indicating that nearly all the species diversity has been captured. The species are more evenly distributed across the sites, with several species found in multiple sites, indicating a more homogeneous distribution. 
+# Seine Assemblage: With a sample coverage of 94.08%, the seine observed most of the species, but additional sampling could have revealed more species. The majority of species are found in only one or two sites, indicating a relatively high level of site-specific species.
+
+# on the other hand, the eDNA assemblage has a sample coverage of 98.75%, indicating that nearly all the species diversity has been captured. The species are more evenly distributed across the sites, with several species found in multiple sites, indicating a more homogeneous distribution. 
 
 
 ```
 
 Let's look at the taxonomy of the eDNA data. 
 ```{r}
+# I need to make sure the sampling month is included in the kb_ASV_table
+kb_ASV_table <- kb_ASV_table %>%
+  mutate(SamplingMonth = case_when(
+    grepl("422", sample_id) ~ "April",
+    grepl("922", sample_id) ~ "September",
+    TRUE ~ "NA"
+  ))
+
 # Filter and select unique taxa for April and September with Count > 0
 april_taxa_edna <- kb_ASV_table %>%
-  filter(grepl("April", SampleID) & Count > 0) %>%
-  dplyr::select(sum_taxa.x) %>%
+  filter(grepl("April", SamplingMonth) & Count > 0) %>%
+  dplyr::select(sum_taxa) %>%
   distinct() %>%
-  pull(sum_taxa.x)
+  pull(sum_taxa)
 
 september_taxa_edna <- kb_ASV_table %>%
-  filter(grepl("September", SampleID) & Count > 0) %>%
-  dplyr::select(sum_taxa.x) %>%
+  filter(grepl("September", SamplingMonth) & Count > 0) %>%
+  dplyr::select(sum_taxa) %>%
   distinct() %>%
-  pull(sum_taxa.x)
+  pull(sum_taxa)
 
 # Create a list of the taxa
 taxa_list <- list(April = april_taxa_edna, September = september_taxa_edna)
@@ -999,9 +1050,18 @@ taxa_list <- list(April = april_taxa_edna, September = september_taxa_edna)
 venn_plot <- ggVennDiagram(taxa_list, label_alpha = 0) +
   ggtitle("Venn Diagram of eDNA samples") +
   theme(legend.position = "none") # Remove the legend for clarity
+print(venn_plot)
 ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/eDNA_venn_diagram.pdf")
 # Extract the unique and shared taxa
 unique_april <- setdiff(april_taxa_edna, september_taxa_edna)
+# having talked to peter and chris guo, it doesn't seem like clarkii, cylindraceum, and mordax would be found in kbay. let's look at what samples these occured in for april.
+kb_ASV_table %>%
+  filter(sum_taxa %in% c("Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Oncorhynchus,Oncorhynchus clarkii", "Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Prosopium,Prosopium cylindraceum", "Eukaryota,Chordata,Actinopteri,Osmeriformes,Osmeridae,Osmerus,Osmerus mordax") & grepl("April", SamplingMonth)) %>%
+  dplyr::select(sample_id, sum_taxa, Count) %>%
+  arrange(sum_taxa, desc(Count))
+# each of these only occured in one PCR replicate and a single sample for each, at a different site. I think we can safely remove these from the dataset.
+kb_ASV_table <- kb_ASV_table %>%
+  filter(!sum_taxa %in% c("Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Oncorhynchus,Oncorhynchus clarkii", "Eukaryota,Chordata,Actinopteri,Salmoniformes,Salmonidae,Prosopium,Prosopium cylindraceum", "Eukaryota,Chordata,Actinopteri,Osmeriformes,Osmeridae,Osmerus,Osmerus mordax"))
 unique_september <- setdiff(september_taxa_edna, april_taxa_edna)
 shared_taxa <- intersect(april_taxa_edna, september_taxa_edna)
 
@@ -1013,17 +1073,17 @@ print(venn_plot)
 
 kb_ASV_table$TaxonomicLevel <- NA
 for (i in 1:nrow(kb_ASV_table)){
-  if (!is.na(kb_ASV_table$species.x[i])){
+  if (!is.na(kb_ASV_table$species[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Species"
-  } else if (!is.na(kb_ASV_table$genus.x[i])){
+  } else if (!is.na(kb_ASV_table$genus[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Genus"
-  } else if (!is.na(kb_ASV_table$family.x[i])){
+  } else if (!is.na(kb_ASV_table$family[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Family"
-  } else if (!is.na(kb_ASV_table$order.x[i])){
+  } else if (!is.na(kb_ASV_table$order[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Order"
-  } else if (!is.na(kb_ASV_table$class.x[i])){
+  } else if (!is.na(kb_ASV_table$class[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Class"
-  } else if (!is.na(kb_ASV_table$phylum.x[i])){
+  } else if (!is.na(kb_ASV_table$phylum[i])){
     kb_ASV_table$TaxonomicLevel[i] <- "Phylum"
   } else {
     kb_ASV_table$TaxonomicLevel[i] <- "NA"
@@ -1032,7 +1092,7 @@ for (i in 1:nrow(kb_ASV_table)){
 
 # Group by TaxonomicLevel and sum_taxa, then count the occurrences
 taxonomic_counts <- kb_ASV_table %>%
-  group_by(TaxonomicLevel, sum_taxa.x, nReads > 0) %>%
+  group_by(TaxonomicLevel, sum_taxa, nReads > 0) %>%
   summarise(n = n()) %>%
   distinct()
 
@@ -1041,36 +1101,57 @@ taxonomic_counts %>%
      group_by(TaxonomicLevel,`nReads > 0` == "TRUE") %>%
      summarise(total_count = n())
 
-
+# 28 identified to species, 8 to genus, and 3 to family.
 
 ```
 Now compare eDNA and seine 
 ```{r}
 # Extract unique taxa from the seine data
-seine_taxa <- kb_seine %>%
-  dplyr::select(ScientificName) %>%
-  distinct() %>%
-  pull(ScientificName)
+seine_taxa <- unique_taxa
 
 # Extract unique taxa from the eDNA data for April and September with Count > 0
 edna_taxa <- kb_ASV_table %>%
-  filter((grepl("April", SampleID) | grepl("September", SampleID)) & Count > 0) %>%
-  dplyr::select(sum_taxa.x) %>%
+  filter((grepl("April", SamplingMonth) | grepl("September", SamplingMonth)) & Count > 0) %>%
+  dplyr::select(sum_taxa) %>%
   distinct() %>%
-  pull(sum_taxa.x)
+  pull(sum_taxa)
+# let's separate the sum_taxa into the different taxonomic levels. we will just join with the kb_ASV_table to get the taxonomic levels
+edna_taxa <- kb_ASV_table %>%
+  filter(sum_taxa %in% edna_taxa) %>%
+  dplyr::select(sum_taxa, species, genus, family, order, class, phylum) %>%
+  distinct()
 
 # Create a list of the taxa
 taxa_list <- list(Seine = seine_taxa, eDNA = edna_taxa)
+# each of these lists has taxa broken down by taxonomic level. seine has the following columns: ScientificName,Phylum,Class,Order,Family,Genus,Species, and Method. eDNA has the following columns: sum_taxa, species, genus, family, order, class, and phylum. we will only compare the sum_taxa column from eDNA to the ScientificName column from seine. I want to create an upset plot to compare at each of these taxonomic levels.
+
+# create a list of the taxa split by taxonomic level
+taxa_species <- list(Seine = seine_taxa$ScientificName, eDNA = edna_taxa$species)
+taxa_genus <- list(Seine = seine_taxa$Genus, eDNA = edna_taxa$genus)
 
 # Create the Venn diagram with labels
-venn_plot <- ggVennDiagram(taxa_list, label_alpha = 0) +
-  ggtitle("Venn Diagram of Unique Taxa in Seine and eDNA Samples") +
+venn_plot <- ggVennDiagram(taxa_species, label_alpha = 0) +
+  ggtitle("Venn Diagram of Unique species in Seine and eDNA Samples") +
   theme(legend.position = "none") # Remove the legend for clarity
+print(venn_plot)
+unique_seine <- setdiff(taxa_species$Seine, taxa_species$eDNA)
+unique_edna <- setdiff(taxa_species$eDNA, taxa_species$Seine)
+shared_taxa <- intersect(taxa_species$Seine, taxa_species$eDNA)
+venn_genus <- ggVennDiagram(taxa_genus, label_alpha = 0) +
+  ggtitle("Venn Diagram of Unique genus in Seine and eDNA Samples") +
+  theme(legend.position = "none") # Remove the legend for clarity
+print(venn_genus)
+unique_seine <- setdiff(taxa_genus$Seine, taxa_genus$eDNA)
+unique_edna <- setdiff(taxa_genus$eDNA, taxa_genus$Seine)
+shared_taxa <- intersect(taxa_genus$Seine, taxa_genus$eDNA)
+# create a df with unique_seine, unique_edna, and shared_taxa
+
+##### stopped here jan 18th 4:30PM
 ggplot2::ggsave("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/seine_edna_venn_diagram.pdf")
 # Extract the unique and shared taxa
-unique_seine <- setdiff(seine_taxa, edna_taxa)
-unique_edna <- setdiff(edna_taxa, seine_taxa)
-shared_taxa <- intersect(seine_taxa, edna_taxa)
+unique_seine <- setdiff(taxa_species$Seine, taxa_species$eDNA)
+unique_edna <- setdiff(taxa_species$eDNA, taxa_species$Seine)
+shared_taxa <- intersect(taxa_species$Seine, taxa_species$eDNA)
 
 ```
 
