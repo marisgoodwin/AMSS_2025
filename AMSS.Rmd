@@ -46,12 +46,15 @@ library(iNEXT)
 library(ggVennDiagram)
 library(fitdistrplus)
 library(reshape2)
+# install.packages("UpSetR")
+library(UpSetR)
 # devtools::install_github("donaldtmcknight/microDecon") #Installs microDecon
 library(microDecon)
 ```
 
 # Next we will load the data and take a look at it. 
 ```{r load data}
+
 # Load the seine data including fish community data and taxa classification
 seine <- read.csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/seine/2019_2020_2021_2022_Fish_Community_Data.csv")
 seine_taxa <- read.csv("/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/inputs/seine/fish_taxa_classification.csv")
@@ -252,7 +255,10 @@ september_taxa <- unique(september_taxa$ScientificName)
 
 # Create a list of the taxa
 taxa_list <- list(April = april_taxa, September = september_taxa)
-
+unique_taxa <- unique_taxa %>% 
+  inner_join(seine_taxa, by = c("ScientificName" = "sheetname"))
+# add in seine as the method
+unique_taxa$Method <- "seine"
 # Create the Venn diagram
 ggVennDiagram(taxa_list) +
   ggtitle("Venn Diagram of Seine Samples")
@@ -550,272 +556,7 @@ kb_ASV_table <- ASV_table_used %>%
 kb_ASV_table$SampleID <- paste(kb_ASV_table$Site, kb_ASV_table$SamplingMonth, sep = "_")
 
 ```
-```{r}
-# Identify blank samples
-blank_samples <- kb_ASV_table %>%
-  filter(source == "Field Negatives")
-numb.blanks <- nrow(blank_samples)
 
-# Add blank samples
-step.3_barcode1 <- bind_rows(blank_samples, kb_ASV_table)
-
-kb_ASV_table_summarized <- kb_ASV_table %>%
-  group_by(Hash, sample_id) %>%
-  summarise(nReads = sum(nReads), .groups = "drop")
-
-# Pivot to wide format
-step.3_barcode1_wide <- kb_ASV_table_summarized %>%
-  pivot_wider(names_from = sample_id, values_from = nReads, values_fill = list(nReads = 0))
-
-# Assuming metadata is available and has the correct columns
-metadata <- kb_ASV_table %>% 
-  dplyr::select(sample_id, Site, SamplingMonth) %>% 
-  distinct()
-
-# Assign groups
-sample_counter <- step.3_barcode1_wide %>%
-  pivot_longer(cols = -Hash, names_to = "sample_id", values_to = "nReads") %>%
-  left_join(metadata, by = "sample_id") %>%
-  group_by(Site, SamplingMonth) %>%
-  count()
-numb.ind <- sample_counter$n
-
-step.3_barcode1_decon <- decon(
-   data = step.3_barcode1_wide,
-   numb.blanks = nrow(blank_samples),
-   numb.ind = sample_counter$n,
-   taxa = TRUE,
-   runs = step3_runs,
-   thresh = step3_thresh,
-   prop.thresh = step3_prop.thresh,
-   regression = step3_regression
- )
-```
-
-
-```{r}
-# Process the data and create the bar plot
-kb_ASV_table %>%
-  mutate(nReads = as.numeric(nReads)) %>%
-  mutate(nReads = ifelse(is.na(nReads), 0, nReads)) %>%
-  filter(source == "Positives") %>%
-  filter(nReads > 0) %>%
-  ggplot(aes(x = sample_id, y = nReads, fill = sum_taxa.x)) +
-  geom_bar(stat = "identity") + 
-  theme_bw() +
-  labs(
-    y = "number of sequencing reads",
-    x = "sample ID",
-    title = "ASV reads - positive controls"
-  ) + 
-  theme(
-    axis.text.x = element_text(angle = 90, hjust = 0.95),
-    legend.text = element_text(size = 8),
-    legend.key.size = unit(0.3, "cm"),
-    #legend.position = "none",
-    legend.title = element_blank()
-  )
-# Calculate the maximum proportion of reads for each ASV in positive controls:
-
-prop_asvs_in_positives <- kb_ASV_table %>%
-  filter(source == "Positives") %>%
-  group_by(sample_id) %>%
-  mutate(TotalReadsPerSample = sum(nReads)) %>%
-  mutate(Prop = nReads / TotalReadsPerSample) %>%
-  group_by(Hash) %>%
-  summarise(max_prop = max(Prop)) %>%
-  arrange(desc(max_prop))
-# Subtract the maximum proportion of tag-jumped reads for each ASV from samples:
-
-indexhop_table <- kb_ASV_table %>%
-  mutate(nReads = as.numeric(nReads)) %>%
-  mutate(nReads = ifelse(is.na(nReads), 0, nReads)) %>%
-  group_by(sample_id) %>%
-  mutate(TotalReadsPerSample = sum(nReads, na.rm = TRUE)) %>%
-  left_join(prop_asvs_in_positives, by = c("Hash")) %>%
-  mutate(IndexHoppingReads = TotalReadsPerSample * max_prop) %>%
-  mutate(reads_IndexHop_removed = nReads - IndexHoppingReads) %>%
-  mutate(reads_IndexHop_removed = if_else(reads_IndexHop_removed < 0, 0, reads_IndexHop_removed))
-
-# Clean up the table by removing columns no longer needed:
-asv_table_filter1 <- indexhop_table %>%
-  dplyr::select(sample_id, source, Hash, reads_IndexHop_removed) %>%
-  dplyr::rename(reads = reads_IndexHop_removed)
-decontaminated_1 <- indexhop_table %>%
-  dplyr::select(sample_id, Hash, IndexHoppingReads) %>%
-  pivot_wider(names_from = "Hash", values_from = "IndexHoppingReads")
-
-
-reads_per_type_ASV <- asv_table_filter1 %>%
-  group_by(Hash, source) %>%
-  summarize(TotalReadsPerASV = sum(reads, na.rm = TRUE)) %>%
-  arrange(Hash)
-```
-what ASVs have no reads in samples, but reads in the controls? 
-```{r}
-not_in_samples <- reads_per_type_ASV %>%
-  pivot_wider(names_from = "source", values_from = c("TotalReadsPerASV")) %>%
-    filter(Samples < 1 & Positives > 0 & Negatives > 0 & `Field Negatives` > 0)
-not_in_samples
-```
-```{r}
-asv_table_wide <- asv_table_filter1 %>%
-  dplyr::select(!source) %>%
-  mutate(reads = as.integer(reads)) %>%
-  pivot_wider(names_from = Hash, values_from = reads)
-
-sample_IDs <- asv_table_wide$sample_id
-
-asv_table_wide <- asv_table_wide %>%
-  ungroup() %>%
-  dplyr::select(-sample_id)
-
-## plots the figure
-rarecurve(asv_table_wide, step = 20, col = "blue", label = FALSE, 
-          main = "Sequencing Effort Curves",
-          xlab = "Sequencing Depth", ylab = "Number of ASVs Identified",
-          xlim = c(0,5000))
-```
-
-summarize in a table how many pcr replicates meet certain read count thresholds 
-```{r}
-read_summary <- asv_table_filter1 %>%
-  group_by(sample_id, source) %>%
-  summarize(tot_reads = sum(reads)) %>%
-  arrange(desc(tot_reads)) %>%
-  group_by(source) %>%
-  summarize(atleast1 = sum(tot_reads >= 1),
-            atleast250 = sum(tot_reads >= 250),
-            atleast500 = sum(tot_reads >= 500),
-            atleast750 = sum(tot_reads >= 750),
-            atleast1k = sum(tot_reads >= 1000),
-            atleast2k = sum(tot_reads >= 2000))
-read_summary
-```
-
-based on taxa accumulation curve and summary table, we will remove any pcr replicate with fewer than 1000 reads from downstream analyses
-
-```{r}
-reps_below <- asv_table_filter1 %>%
-  group_by(sample_id) %>%
-  summarise(tot_reads = sum(reads)) %>%
-  filter(tot_reads < 1000)
-asv_table_filter <- asv_table_filter1 %>%
-  filter(!sample_id %in% reps_below$sample_id)
-asv_table_filtered <- asv_table_filter %>%
-  inner_join(kb_ASV_table, by = "Hash", relationship = "many-to-many") %>%
-  filter(!(genus.x %in% c("Coryphaena","Oreochromis")))
-write.csv(asv_table_filtered, "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/ASV_table_filtered.csv")
-```
-
-```{r}
-# Step 1: Identify negative control hashes
-negative_control_hashes <- kb_ASV_table %>%
-  filter(source == "Negatives" & nReads > 0) %>%
-  pull(Hash) %>%
-  unique()
-
-# Step 2: Filter the data for negative control hashes
-filtered_data <- kb_ASV_table %>%
-  filter(Hash %in% negative_control_hashes)
-
-# Step 3: Calculate the total reads per sample
-filtered_data <- filtered_data %>%
-  group_by(sample_id) %>%
-  mutate(total_reads_per_sample = sum(nReads)) %>%
-  ungroup()
-
-# Step 4: Calculate the read percentage
-filtered_data <- filtered_data %>%
-  mutate(read_percentage = nReads / total_reads_per_sample)
-
-# Step 5: Define the threshold percentage (example value, replace with actual threshold)
-threshold_percentage <- 0.015
-
-# Step 6: Filter based on the threshold percentage
-filtered_data <- filtered_data %>%
-  filter(read_percentage >= threshold_percentage)
-
-# Print the filtered data
-print(filtered_data)
-```
-
-```{r}
-# Calculate negative control reads for the most abundant fish species
-negative_control_reads <- filtered_data %>%
-  filter(source == "Negatives") %>%
-  group_by(Hash) %>%
-  summarise(total_reads = sum(nReads)) %>%
-  arrange(desc(total_reads)) %>%
-  slice(1) %>%
-  pull(total_reads)
-
-# Calculate the number of negative controls
-number_of_negative_controls <- kb_ASV_table %>%
-  filter(source == "Negatives") %>%
-  summarise(n = n_distinct(sample_id)) %>%
-  pull(n)
-
-# Calculate the number of water samples
-number_of_water_samples <- kb_ASV_table %>%
-  filter(source == "Samples") %>%
-  summarise(n = n_distinct(sample_id)) %>%
-  pull(n)
-
-# Calculate the total target fish reads
-total_target_fish_reads <- kb_ASV_table %>%
-  filter(source == "Samples") %>%
-  summarise(total_reads = sum(nReads)) %>%
-  pull(total_reads)
-
-# Print the calculated values
-negative_control_reads
-number_of_negative_controls
-number_of_water_samples
-total_target_fish_reads
-
-per_species_per_control_contamination <- negative_control_reads / number_of_negative_controls
-total_potential_per_taxa_contamination <- per_species_per_control_contamination * number_of_water_samples
-threshold_cutoff <- total_potential_per_taxa_contamination / total_target_fish_reads
-
-# Step 2: Filter out species that contribute equal to or less than 0.55% of the total target fish reads in a sample
-filtered_data <- kb_ASV_table %>%
-  group_by(sample_id) %>%
-  mutate(total_reads_per_sample = sum(nReads)) %>%
-  ungroup() %>%
-  mutate(read_percentage = nReads / total_reads_per_sample) %>%
-  filter(read_percentage > threshold_cutoff)
-
-# Step 3: Inspect sample level rarefaction curves
-# Prepare data for rarefaction curves
-rarefaction_data <- filtered_data %>%
-  select(sample_id, Hash, nReads) %>%
-  spread(key = Hash, value = nReads, fill = 0)
-
-# Plot rarefaction curves
-plot_rarefaction_curves <- function(data) {
-  rarefaction_data <- rarefy(data, sample = min(rowSums(data)))
-  rarecurve(rarefaction_data, step = 20, sample = min(rowSums(data)), col = "blue", cex = 0.6)
-}
-
-plot_rarefaction_curves(rarefaction_data)
-
-# Step 4: Check the assemblage composition using nMDS
-# Prepare data for nMDS
-nmds_data <- filtered_data %>%
-  select(sample_id, Hash, nReads) %>%
-  spread(key = Hash, value = nReads, fill = 0) %>%
-  column_to_rownames(var = "sample_id")
-
-# Perform nMDS
-nmds_result <- metaMDS(nmds_data, distance = "bray", k = 2, trymax = 100)
-
-# Plot nMDS
-plot(nmds_result, type = "t")
-
-# Check for outliers
-stressplot(nmds_result)
-```
 ### Step 1: Nest the dataset and split it in positives and samples
 ```{r}
 kb_ASV_table %>% 
@@ -1333,21 +1074,274 @@ shared_taxa <- intersect(seine_taxa, edna_taxa)
 
 ```
 
-# Rarefaction curves for the eDNA data. Was our sampling depth enough to cover all the diversity within our samples 
+
+##############################################
+This is code that I am just messing around with. Other ways that people clean their data before going into analyses. The code above is from Zack's gruinard decon package. 
+
+This is code to help me figure out microDecon
 ```{r}
-# this is the line of code we will be using to plot rarefaction curves for  the data. From this link: https://grunwaldlab.github.io/metacoder_documentation/workshop--06--quality_control.html. We will need to make some modifications to fit with our given data. and we want to 
-rarecurve(t(obj$data$otu_counts[, "M1981P563"]), step = 20,
-          sample = min(colSums(obj$data$otu_counts[, sample_data$SampleID])),
-          col = "blue", cex = 1.5)
+# Identify blank samples
+blank_samples <- kb_ASV_table %>%
+  filter(source == "Field Negatives")
+numb.blanks <- nrow(blank_samples)
+
+# Add blank samples
+step.3_barcode1 <- bind_rows(blank_samples, kb_ASV_table)
+
+kb_ASV_table_summarized <- kb_ASV_table %>%
+  group_by(Hash, sample_id) %>%
+  summarise(nReads = sum(nReads), .groups = "drop")
+
+# Pivot to wide format
+step.3_barcode1_wide <- kb_ASV_table_summarized %>%
+  pivot_wider(names_from = sample_id, values_from = nReads, values_fill = list(nReads = 0))
+
+# Assuming metadata is available and has the correct columns
+metadata <- kb_ASV_table %>% 
+  dplyr::select(sample_id, Site, SamplingMonth) %>% 
+  distinct()
+
+# Assign groups
+sample_counter <- step.3_barcode1_wide %>%
+  pivot_longer(cols = -Hash, names_to = "sample_id", values_to = "nReads") %>%
+  left_join(metadata, by = "sample_id") %>%
+  group_by(Site, SamplingMonth) %>%
+  count()
+numb.ind <- sample_counter$n
+
+step.3_barcode1_decon <- decon(
+   data = step.3_barcode1_wide,
+   numb.blanks = nrow(blank_samples),
+   numb.ind = sample_counter$n,
+   taxa = TRUE,
+   runs = step3_runs,
+   thresh = step3_thresh,
+   prop.thresh = step3_prop.thresh,
+   regression = step3_regression
+ )
 ```
 
 
+```{r}
+# Process the data and create the bar plot
+kb_ASV_table %>%
+  mutate(nReads = as.numeric(nReads)) %>%
+  mutate(nReads = ifelse(is.na(nReads), 0, nReads)) %>%
+  filter(source == "Positives") %>%
+  filter(nReads > 0) %>%
+  ggplot(aes(x = sample_id, y = nReads, fill = sum_taxa.x)) +
+  geom_bar(stat = "identity") + 
+  theme_bw() +
+  labs(
+    y = "number of sequencing reads",
+    x = "sample ID",
+    title = "ASV reads - positive controls"
+  ) + 
+  theme(
+    axis.text.x = element_text(angle = 90, hjust = 0.95),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(0.3, "cm"),
+    #legend.position = "none",
+    legend.title = element_blank()
+  )
+# Calculate the maximum proportion of reads for each ASV in positive controls:
 
-# Select the relevant columns
-df <- edna_meta %>% dplyr::select(Region, Site, SamplingDate)
+prop_asvs_in_positives <- kb_ASV_table %>%
+  filter(source == "Positives") %>%
+  group_by(sample_id) %>%
+  mutate(TotalReadsPerSample = sum(nReads)) %>%
+  mutate(Prop = nReads / TotalReadsPerSample) %>%
+  group_by(Hash) %>%
+  summarise(max_prop = max(Prop)) %>%
+  arrange(desc(max_prop))
+# Subtract the maximum proportion of tag-jumped reads for each ASV from samples:
 
-# Drop duplicate rows
-df <- df %>% distinct()
+indexhop_table <- kb_ASV_table %>%
+  mutate(nReads = as.numeric(nReads)) %>%
+  mutate(nReads = ifelse(is.na(nReads), 0, nReads)) %>%
+  group_by(sample_id) %>%
+  mutate(TotalReadsPerSample = sum(nReads, na.rm = TRUE)) %>%
+  left_join(prop_asvs_in_positives, by = c("Hash")) %>%
+  mutate(IndexHoppingReads = TotalReadsPerSample * max_prop) %>%
+  mutate(reads_IndexHop_removed = nReads - IndexHoppingReads) %>%
+  mutate(reads_IndexHop_removed = if_else(reads_IndexHop_removed < 0, 0, reads_IndexHop_removed))
 
-# Sort the dataframe by Region and Site
-df <- df %>% arrange(Region, Site)
+# Clean up the table by removing columns no longer needed:
+asv_table_filter1 <- indexhop_table %>%
+  dplyr::select(sample_id, source, Hash, reads_IndexHop_removed) %>%
+  dplyr::rename(reads = reads_IndexHop_removed)
+decontaminated_1 <- indexhop_table %>%
+  dplyr::select(sample_id, Hash, IndexHoppingReads) %>%
+  pivot_wider(names_from = "Hash", values_from = "IndexHoppingReads")
+
+
+reads_per_type_ASV <- asv_table_filter1 %>%
+  group_by(Hash, source) %>%
+  summarize(TotalReadsPerASV = sum(reads, na.rm = TRUE)) %>%
+  arrange(Hash)
+```
+what ASVs have no reads in samples, but reads in the controls? 
+```{r}
+not_in_samples <- reads_per_type_ASV %>%
+  pivot_wider(names_from = "source", values_from = c("TotalReadsPerASV")) %>%
+    filter(Samples < 1 & Positives > 0 & Negatives > 0 & `Field Negatives` > 0)
+not_in_samples
+```
+```{r}
+asv_table_wide <- asv_table_filter1 %>%
+  dplyr::select(!source) %>%
+  mutate(reads = as.integer(reads)) %>%
+  pivot_wider(names_from = Hash, values_from = reads)
+
+sample_IDs <- asv_table_wide$sample_id
+
+asv_table_wide <- asv_table_wide %>%
+  ungroup() %>%
+  dplyr::select(-sample_id)
+
+## plots the figure
+rarecurve(asv_table_wide, step = 20, col = "blue", label = FALSE, 
+          main = "Sequencing Effort Curves",
+          xlab = "Sequencing Depth", ylab = "Number of ASVs Identified",
+          xlim = c(0,5000))
+```
+
+summarize in a table how many pcr replicates meet certain read count thresholds 
+```{r}
+read_summary <- asv_table_filter1 %>%
+  group_by(sample_id, source) %>%
+  summarize(tot_reads = sum(reads)) %>%
+  arrange(desc(tot_reads)) %>%
+  group_by(source) %>%
+  summarize(atleast1 = sum(tot_reads >= 1),
+            atleast250 = sum(tot_reads >= 250),
+            atleast500 = sum(tot_reads >= 500),
+            atleast750 = sum(tot_reads >= 750),
+            atleast1k = sum(tot_reads >= 1000),
+            atleast2k = sum(tot_reads >= 2000))
+read_summary
+```
+
+based on taxa accumulation curve and summary table, we will remove any pcr replicate with fewer than 1000 reads from downstream analyses
+
+```{r}
+reps_below <- asv_table_filter1 %>%
+  group_by(sample_id) %>%
+  summarise(tot_reads = sum(reads)) %>%
+  filter(tot_reads < 1000)
+asv_table_filter <- asv_table_filter1 %>%
+  filter(!sample_id %in% reps_below$sample_id)
+asv_table_filtered <- asv_table_filter %>%
+  inner_join(kb_ASV_table, by = "Hash", relationship = "many-to-many") %>%
+  filter(!(genus.x %in% c("Coryphaena","Oreochromis")))
+write.csv(asv_table_filtered, "/Users/marisgoodwin/Documents/GITHUB/AMSS_2025/outputs/ASV_table_filtered.csv")
+```
+
+```{r}
+# Step 1: Identify negative control hashes
+negative_control_hashes <- kb_ASV_table %>%
+  filter(source == "Negatives" & nReads > 0) %>%
+  pull(Hash) %>%
+  unique()
+
+# Step 2: Filter the data for negative control hashes
+filtered_data <- kb_ASV_table %>%
+  filter(Hash %in% negative_control_hashes)
+
+# Step 3: Calculate the total reads per sample
+filtered_data <- filtered_data %>%
+  group_by(sample_id) %>%
+  mutate(total_reads_per_sample = sum(nReads)) %>%
+  ungroup()
+
+# Step 4: Calculate the read percentage
+filtered_data <- filtered_data %>%
+  mutate(read_percentage = nReads / total_reads_per_sample)
+
+# Step 5: Define the threshold percentage (example value, replace with actual threshold)
+threshold_percentage <- 0.015
+
+# Step 6: Filter based on the threshold percentage
+filtered_data <- filtered_data %>%
+  filter(read_percentage >= threshold_percentage)
+
+# Print the filtered data
+print(filtered_data)
+```
+
+```{r}
+# Calculate negative control reads for the most abundant fish species
+negative_control_reads <- filtered_data %>%
+  filter(source == "Negatives") %>%
+  group_by(Hash) %>%
+  summarise(total_reads = sum(nReads)) %>%
+  arrange(desc(total_reads)) %>%
+  slice(1) %>%
+  pull(total_reads)
+
+# Calculate the number of negative controls
+number_of_negative_controls <- kb_ASV_table %>%
+  filter(source == "Negatives") %>%
+  summarise(n = n_distinct(sample_id)) %>%
+  pull(n)
+
+# Calculate the number of water samples
+number_of_water_samples <- kb_ASV_table %>%
+  filter(source == "Samples") %>%
+  summarise(n = n_distinct(sample_id)) %>%
+  pull(n)
+
+# Calculate the total target fish reads
+total_target_fish_reads <- kb_ASV_table %>%
+  filter(source == "Samples") %>%
+  summarise(total_reads = sum(nReads)) %>%
+  pull(total_reads)
+
+# Print the calculated values
+negative_control_reads
+number_of_negative_controls
+number_of_water_samples
+total_target_fish_reads
+
+per_species_per_control_contamination <- negative_control_reads / number_of_negative_controls
+total_potential_per_taxa_contamination <- per_species_per_control_contamination * number_of_water_samples
+threshold_cutoff <- total_potential_per_taxa_contamination / total_target_fish_reads
+
+# Step 2: Filter out species that contribute equal to or less than 0.55% of the total target fish reads in a sample
+filtered_data <- kb_ASV_table %>%
+  group_by(sample_id) %>%
+  mutate(total_reads_per_sample = sum(nReads)) %>%
+  ungroup() %>%
+  mutate(read_percentage = nReads / total_reads_per_sample) %>%
+  filter(read_percentage > threshold_cutoff)
+
+# Step 3: Inspect sample level rarefaction curves
+# Prepare data for rarefaction curves
+rarefaction_data <- filtered_data %>%
+  select(sample_id, Hash, nReads) %>%
+  spread(key = Hash, value = nReads, fill = 0)
+
+# Plot rarefaction curves
+plot_rarefaction_curves <- function(data) {
+  rarefaction_data <- rarefy(data, sample = min(rowSums(data)))
+  rarecurve(rarefaction_data, step = 20, sample = min(rowSums(data)), col = "blue", cex = 0.6)
+}
+
+plot_rarefaction_curves(rarefaction_data)
+
+# Step 4: Check the assemblage composition using nMDS
+# Prepare data for nMDS
+nmds_data <- filtered_data %>%
+  select(sample_id, Hash, nReads) %>%
+  spread(key = Hash, value = nReads, fill = 0) %>%
+  column_to_rownames(var = "sample_id")
+
+# Perform nMDS
+nmds_result <- metaMDS(nmds_data, distance = "bray", k = 2, trymax = 100)
+
+# Plot nMDS
+plot(nmds_result, type = "t")
+
+# Check for outliers
+stressplot(nmds_result)
+```
